@@ -21,12 +21,13 @@
 
 ## 📁 프로젝트 구조
 
+```
 apmlite-agent/
 ├── src/main/java/com/sschoi/APMLiteAgent.java
 ├── pom.xml
 ├── README.md
 └── target/apmlite-agent-1.0.0.jar
-
+```
 
 ---
 
@@ -90,21 +91,28 @@ apmlite-agent/
         </plugins>
     </build>
 </project>
+```
+---
 
 ## 🧩 빌드 방법
+```
 mvn clean package
+```
 
-결과 파일: target/apmlite-agent-1.0.0.jar
-모든 의존성 포함된 Fat JAR 생성
+- 결과 파일: target/apmlite-agent-1.0.0.jar
+- 모든 의존성 포함된 Fat JAR 생성
 
-
+---
 
 ##⚡ 실행 방법
 
 Java 애플리케이션 실행 시 -javaagent 옵션 추가:
+
+```
 java -javaagent:/path/to/apmlite-agent-1.0.0.jar=use_db=true;db_url=jdbc:mariadb://localhost:3306/monitor;db_user=user;db_pass=password -jar myapp.jar
+```
 
-
+---
 
 ##⚙️ Agent 설정 인자
 
@@ -117,14 +125,16 @@ java -javaagent:/path/to/apmlite-agent-1.0.0.jar=use_db=true;db_url=jdbc:mariadb
 | `db_pass` | `password`                              | DB 비밀번호               |
 | `use_log` | `true`                                  | 콘솔 로그 활성화 여부          |
 
-예시:
-
+**예시:**
+```bash
 -javaagent:apmlite-agent.jar=use_db=true;slow_ms=500;use_log=true
+```
 
-
+---
 
 ##🧾 MySQL DDL
 
+```sql
 CREATE TABLE IF NOT EXISTS apm_query_log (
     id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '고유 식별자',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '로그 시각',
@@ -135,14 +145,19 @@ CREATE TABLE IF NOT EXISTS apm_query_log (
     INDEX idx_created_at (created_at),
     INDEX idx_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='APMLite SQL 실행 로그';
+```
 
+---
 
 ## 📊 콘솔 출력 예시
 
+```
 [APMLite] Agent started successfully.
 [APMLite] Captured SlowQuery: 324ms
 SQL: SELECT * FROM users WHERE id = ?
+```
 
+---
 
 ## ⚠️ 안정성 및 주의사항
 
@@ -151,7 +166,7 @@ SQL: SELECT * FROM users WHERE id = ?
 - Thread-safe하게 동작
 - ByteBuddy Agent는 클래스 로드 시점에만 개입하므로 런타임 영향 거의 없음
 
-
+---
 
 ## 🧑‍💻 개발 정보
 
@@ -165,13 +180,15 @@ SQL: SELECT * FROM users WHERE id = ?
 | Version    | 1.0.0                      |
 | License    | MIT                        |
 
+---
 
 
 ## 📄 License
+```
 MIT License
 Copyright (c) 2025
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files...
-
+```
 
 
 
