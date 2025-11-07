@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.sschoi</groupId>
+  <artifactId>apmlite-agent</artifactId>
+  <version>1.0.0</version>
+  <name>apmlite-agent</name>
+  <description>Unified JVM APM Monitoring Agent</description>
+
+  <properties>
+    <maven.compiler.source>1.8</maven.compiler.source>
+    <maven.compiler.target>1.8</maven.compiler.target>
+  </properties>
+
+  <dependencies>
+    <!-- ✅ Mariadb 드라이버 포함 -->
+    <dependency>
+	    <groupId>org.mariadb.jdbc</groupId>
+	    <artifactId>mariadb-java-client</artifactId>
+	    <version>2.7.10</version> <!-- 안정적인 최신 버전으로 설정 -->
+	</dependency>
+    <!-- ✅ bytebuddy 포함 -->
+    <dependency>
+	    <groupId>net.bytebuddy</groupId>
+	    <artifactId>byte-buddy</artifactId>
+	    <version>1.9.16</version>
+	</dependency>	
+	<dependency>
+	    <groupId>net.bytebuddy</groupId>
+	    <artifactId>byte-buddy-agent</artifactId>
+	    <version>1.9.16</version>
+	</dependency>
+
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!-- ✅ Premain-Class 추가 -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.3.0</version>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <Premain-Class>APMLiteAgent</Premain-Class>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
+
+      <!-- ✅ Fat JAR 생성 (드라이버 병합) -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.4.1</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals><goal>shade</goal></goals>
+            <configuration>
+              <createDependencyReducedPom>false</createDependencyReducedPom>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <manifestEntries>
+                    <Premain-Class>com.sschoi.APMLiteAgent</Premain-Class>
+					<Can-Redefine-Classes>true</Can-Redefine-Classes>
+					<Can-Retransform-Classes>true</Can-Retransform-Classes>
+                  </manifestEntries>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+</project>
