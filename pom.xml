@@ -6,69 +6,68 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>com.sschoi</groupId>
   <artifactId>apmlite-agent</artifactId>
-  <version>1.0.0</version>
-  <name>apmlite-agent</name>
-  <description>Unified JVM APM Monitoring Agent</description>
+  <version>1.1.0</version>
+  <packaging>jar</packaging>
+  <name>APMLite Agent</name>
+  <description>Lightweight Java APM agent with SQL tracing and live dashboard</description>
 
   <properties>
     <maven.compiler.source>1.8</maven.compiler.source>
     <maven.compiler.target>1.8</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <bytebuddy.version>1.14.12</bytebuddy.version>
+    <mariadb.version>2.7.10</mariadb.version>
   </properties>
 
   <dependencies>
-    <!-- ✅ Mariadb 드라이버 포함 -->
     <dependency>
-	    <groupId>org.mariadb.jdbc</groupId>
-	    <artifactId>mariadb-java-client</artifactId>
-	    <version>2.7.10</version> <!-- 안정적인 최신 버전으로 설정 -->
-	</dependency>
-    <!-- ✅ bytebuddy 포함 -->
+      <groupId>net.bytebuddy</groupId>
+      <artifactId>byte-buddy</artifactId>
+      <version>${bytebuddy.version}</version>
+    </dependency>
     <dependency>
-	    <groupId>net.bytebuddy</groupId>
-	    <artifactId>byte-buddy</artifactId>
-	    <version>1.9.16</version>
-	</dependency>	
-	<dependency>
-	    <groupId>net.bytebuddy</groupId>
-	    <artifactId>byte-buddy-agent</artifactId>
-	    <version>1.9.16</version>
-	</dependency>
-
+      <groupId>net.bytebuddy</groupId>
+      <artifactId>byte-buddy-agent</artifactId>
+      <version>${bytebuddy.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.mariadb.jdbc</groupId>
+      <artifactId>mariadb-java-client</artifactId>
+      <version>${mariadb.version}</version>
+    </dependency>
   </dependencies>
 
   <build>
     <plugins>
-      <!-- ✅ Premain-Class 추가 -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-jar-plugin</artifactId>
-        <version>3.3.0</version>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.11.0</version>
         <configuration>
-          <archive>
-            <manifestEntries>
-              <Premain-Class>APMLiteAgent</Premain-Class>
-            </manifestEntries>
-          </archive>
+          <source>${maven.compiler.source}</source>
+          <target>${maven.compiler.target}</target>
+          <encoding>${project.build.sourceEncoding}</encoding>
         </configuration>
       </plugin>
-
-      <!-- ✅ Fat JAR 생성 (드라이버 병합) -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-shade-plugin</artifactId>
-        <version>3.4.1</version>
+        <version>3.5.1</version>
         <executions>
           <execution>
             <phase>package</phase>
-            <goals><goal>shade</goal></goals>
+            <goals>
+              <goal>shade</goal>
+            </goals>
             <configuration>
               <createDependencyReducedPom>false</createDependencyReducedPom>
+              <finalName>${project.artifactId}-${project.version}</finalName>
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                   <manifestEntries>
                     <Premain-Class>com.sschoi.APMLiteAgent</Premain-Class>
-					<Can-Redefine-Classes>true</Can-Redefine-Classes>
-					<Can-Retransform-Classes>true</Can-Retransform-Classes>
+                    <Can-Redefine-Classes>true</Can-Redefine-Classes>
+                    <Can-Retransform-Classes>true</Can-Retransform-Classes>
                   </manifestEntries>
                 </transformer>
               </transformers>
