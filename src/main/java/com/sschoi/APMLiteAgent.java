@@ -374,7 +374,7 @@ public class APMLiteAgent {
                 + ".muted{color:var(--muted)}#timeline{display:flex;align-items:flex-end;gap:6px;height:180px;margin-top:14px}.bar{flex:1;min-width:6px;border-radius:8px 8px 2px 2px;background:linear-gradient(180deg,var(--accent),#2563eb)}"
                 + "@media (max-width:920px){.split{grid-template-columns:1fr}.hero{align-items:start;flex-direction:column}}"
                 + "</style></head><body><div class=\"wrap\">"
-                + "<div class=\"hero\"><div><h1>APMLite Agent</h1><p>Lightweight JVM APM dashboard inspired by Jennifer</p></div><div class=\"muted\">Service <span id=\"service\">-</span></div></div>"
+                + "<div class=\"hero\"><div><h1>APMLite Agent</h1><p>Lightweight JVM APM dashboard</p></div><div class=\"muted\">Service <span id=\"service\">-</span></div></div>"
                 + "<div class=\"grid\">"
                 + "<div class=\"card\"><div class=\"label\">Heap Usage</div><div class=\"value\" id=\"heapPct\">-</div><div class=\"muted\" id=\"heapDetail\">-</div></div>"
                 + "<div class=\"card\"><div class=\"label\">QPS</div><div class=\"value\" id=\"qps\">-</div><div class=\"muted\">Queries per second from the latest sample</div></div>"

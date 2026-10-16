@@ -1,6 +1,6 @@
 # APMLite Agent
 
-`APMLite Agent` is a lightweight Java APM prototype that moves this project closer to a Jennifer-style monitoring experience.
+`APMLite Agent` is a lightweight Java APM prototype that provides a production-oriented monitoring experience.
 
 It runs as a `-javaagent`, instruments JDBC `PreparedStatement` execution, collects JVM metrics, and exposes a built-in live dashboard over HTTP.
 
@@ -243,7 +243,7 @@ When `use_db=true`, the agent creates these tables automatically if they do not 
 - `apm_metric_samples`
 - `apm_slow_queries`
 
-## Jennifer-Like Direction
+## Monitoring Direction
 
 This is still a lightweight prototype, but it now has the core shape of an APM tool:
 >>>>>>> 1

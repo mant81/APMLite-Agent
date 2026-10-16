@@ -1,0 +1,111 @@
+{
+  "schema": "harness-profile/1",
+  "factory_version": "1.9.0",
+  "mode": "new",
+  "at": "2026-10-16T05:00:48Z",
+  "scan": {
+    "runtime": {
+      "agy": "absent",
+      "claude": "absent",
+      "codex": "0.159.2",
+      "gemini": "absent"
+    },
+    "signals": [],
+    "at": "2026-10-16T05:00:48Z"
+  },
+  "answers": {
+    "completion": {
+      "value": [
+        "artifacts-present"
+      ],
+      "source": "assumed",
+      "at": "2026-10-16T05:00:48Z",
+      "default": [
+        "artifacts-present"
+      ],
+      "recommended": [],
+      "why": null,
+      "options_incomplete": false,
+      "other": null
+    },
+    "irreversible": {
+      "value": [
+        "unknown"
+      ],
+      "source": "assumed",
+      "at": "2026-10-16T05:00:48Z",
+      "default": [
+        "unknown"
+      ],
+      "recommended": [],
+      "why": null,
+      "options_incomplete": false,
+      "other": null
+    },
+    "cost": {
+      "value": [
+        "error-worse"
+      ],
+      "source": "assumed",
+      "at": "2026-10-16T05:00:48Z",
+      "default": [
+        "error-worse"
+      ],
+      "recommended": [],
+      "why": null,
+      "options_incomplete": false,
+      "other": null
+    },
+    "approval": {
+      "value": [
+        "before:unknown",
+        "ladder"
+      ],
+      "source": "assumed",
+      "at": "2026-10-16T05:00:48Z",
+      "default": [
+        "before:unknown",
+        "ladder"
+      ],
+      "recommended": [],
+      "why": null,
+      "options_incomplete": false,
+      "other": null
+    },
+    "assets": {
+      "value": [
+        "reuse"
+      ],
+      "source": "assumed",
+      "at": "2026-10-16T05:00:48Z",
+      "default": [
+        "reuse"
+      ],
+      "recommended": [],
+      "why": null,
+      "options_incomplete": false,
+      "other": null,
+      "scanned": {
+        "agents": [],
+        "skills": []
+      }
+    },
+    "egress": {
+      "value": [
+        "allow-listed"
+      ],
+      "source": "assumed",
+      "at": "2026-10-16T05:00:48Z",
+      "default": [
+        "allow-listed"
+      ],
+      "recommended": [],
+      "why": null,
+      "options_incomplete": false,
+      "other": null,
+      "scanned": [
+        "codex"
+      ]
+    }
+  }
+}
