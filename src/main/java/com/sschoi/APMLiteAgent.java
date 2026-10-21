@@ -499,6 +499,7 @@ public class APMLiteAgent {
         private int maxTimelinePoints = 60;
         private long alertHitsPerSecond = 0L;
         private long alertActiveRequests = 0L;
+        private double alertErrorPercent = 0D;
 
         private void apply(String agentArgs) {
             if (agentArgs == null || agentArgs.trim().isEmpty()) {
@@ -538,6 +539,8 @@ public class APMLiteAgent {
                     alertHitsPerSecond = Math.max(0L, Long.parseLong(value));
                 } else if ("alert_active".equals(key) || "alert_active_requests".equals(key)) {
                     alertActiveRequests = Math.max(0L, Long.parseLong(value));
+                } else if ("alert_error_percent".equals(key)) {
+                    alertErrorPercent = Math.max(0D, Math.min(100D, Double.parseDouble(value)));
                 }
             }
         }
@@ -731,10 +734,13 @@ public class APMLiteAgent {
     private static final class TrafficMetrics {
         private static final int MAX_URI_STATS = 1000;
         private final AtomicLong totalHits = new AtomicLong();
+        private final AtomicLong totalErrors = new AtomicLong();
         private final AtomicLong activeRequests = new AtomicLong();
         private final AtomicLong lastHitsBase = new AtomicLong();
+        private final AtomicLong lastErrorsBase = new AtomicLong();
         private volatile long lastHitsRotateNanos = System.nanoTime();
         private volatile long hitsPerSecond;
+        private volatile double errorRatePercent;
         private final ConcurrentHashMap<String, TrafficStat> uriStats = new ConcurrentHashMap<String, TrafficStat>();
 
         private void enter(Object request) {
@@ -751,9 +757,11 @@ public class APMLiteAgent {
         private void observe(Object request, Object response, long durationNanos, Throwable thrown) {
             String uri = requestUri(request);
             TrafficStat stat = getOrCreate(uri);
+            int status = responseStatus(response);
+            boolean error = thrown != null || status >= 500;
+            if (error) totalErrors.incrementAndGet();
             if (stat != null) {
-                int status = responseStatus(response);
-                stat.observe(durationNanos, thrown != null || status >= 500);
+                stat.observe(durationNanos, error);
                 stat.active.updateAndGet(value -> value > 0 ? value - 1 : 0);
             }
         }
@@ -765,7 +773,10 @@ public class APMLiteAgent {
             long elapsedNanos = now - lastHitsRotateNanos;
             lastHitsRotateNanos = now;
             long hits = current - previous;
+            long currentErrors = totalErrors.get();
+            long errors = currentErrors - lastErrorsBase.getAndSet(currentErrors);
             hitsPerSecond = elapsedNanos <= 0L ? hits : Math.round(hits * (1_000_000_000D / elapsedNanos));
+            errorRatePercent = hits <= 0L ? 0D : errors * 100D / hits;
             for (TrafficStat stat : uriStats.values()) {
                 stat.rotateHitsPerSecond(elapsedNanos);
             }
@@ -785,13 +796,15 @@ public class APMLiteAgent {
                         .append("\"active\":").append(stat.active.get()).append(',')
                         .append("\"avgMs\":").append(formatDouble(stat.averageMs())).append(',')
                         .append("\"maxMs\":").append(TimeUnit.NANOSECONDS.toMillis(stat.maxNanos.get())).append(',')
-                        .append("\"errors\":").append(stat.errors.get()).append('}');
+                        .append("\"errors\":").append(stat.errors.get()).append(',')
+                        .append("\"errorRatePercent\":").append(formatDouble(stat.errorRatePercent)).append('}');
             }
             items.append(']');
             return "{"
                     + "\"totalHits\":" + totalHits.get() + ","
                     + "\"hitsPerSecond\":" + hitsPerSecond + ","
                     + "\"tps\":" + hitsPerSecond + ","
+                    + "\"errorRatePercent\":" + formatDouble(errorRatePercent) + ","
                     + "\"activeRequests\":" + activeRequests.get() + ","
                     + "\"uniqueUsers\":null,"
                     + "\"uniqueUsersStatus\":\"unknown\","
@@ -807,9 +820,15 @@ public class APMLiteAgent {
             if (CONFIG.alertActiveRequests > 0 && activeRequests.get() >= CONFIG.alertActiveRequests) {
                 alerts.add("{\"type\":\"CONCURRENCY\",\"scope\":\"global\",\"value\":" + activeRequests.get() + ",\"threshold\":" + CONFIG.alertActiveRequests + "}");
             }
+            if (CONFIG.alertErrorPercent > 0D && errorRatePercent >= CONFIG.alertErrorPercent) {
+                alerts.add("{\"type\":\"ERROR_RATE\",\"scope\":\"global\",\"value\":" + formatDouble(errorRatePercent) + ",\"threshold\":" + formatDouble(CONFIG.alertErrorPercent) + "}");
+            }
             for (TrafficStat stat : uriStats.values()) {
                 if (CONFIG.alertHitsPerSecond > 0 && stat.hitsPerSecond >= CONFIG.alertHitsPerSecond) {
                     alerts.add("{\"type\":\"HITS\",\"scope\":\"" + escapeJson(stat.uri) + "\",\"value\":" + stat.hitsPerSecond + ",\"threshold\":" + CONFIG.alertHitsPerSecond + "}");
+                }
+                if (CONFIG.alertErrorPercent > 0D && stat.errorRatePercent >= CONFIG.alertErrorPercent) {
+                    alerts.add("{\"type\":\"ERROR_RATE\",\"scope\":\"" + escapeJson(stat.uri) + "\",\"value\":" + formatDouble(stat.errorRatePercent) + ",\"threshold\":" + formatDouble(CONFIG.alertErrorPercent) + "}");
                 }
             }
             return "{\"status\":\"" + (alerts.isEmpty() ? "OK" : "ALERT") + "\",\"alerts\":[" + String.join(",", alerts) + "]}";
@@ -856,7 +875,9 @@ public class APMLiteAgent {
         private final AtomicLong maxNanos = new AtomicLong();
         private final AtomicLong errors = new AtomicLong();
         private final AtomicLong lastHitsBase = new AtomicLong();
+        private final AtomicLong lastErrorsBase = new AtomicLong();
         private volatile long hitsPerSecond;
+        private volatile double errorRatePercent;
 
         private TrafficStat(String uri) { this.uri = uri; }
 
@@ -886,6 +907,10 @@ public class APMLiteAgent {
             long previous = lastHitsBase.getAndSet(current);
             long delta = current - previous;
             hitsPerSecond = elapsedNanos <= 0L ? delta : Math.round(delta * (1_000_000_000D / elapsedNanos));
+            long currentErrors = errors.get();
+            long previousErrors = lastErrorsBase.getAndSet(currentErrors);
+            long deltaErrors = currentErrors - previousErrors;
+            errorRatePercent = delta <= 0L ? 0D : deltaErrors * 100D / delta;
         }
     }
 
