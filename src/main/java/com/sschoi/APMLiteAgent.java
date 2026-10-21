@@ -246,6 +246,7 @@ public class APMLiteAgent {
             server.createContext("/api/sql/slow", exchange -> writeResponse(exchange, "application/json; charset=utf-8", STORE.slowQueriesJson()));
             server.createContext("/api/sql/timeline", exchange -> writeResponse(exchange, "application/json; charset=utf-8", STORE.sqlTimelineJson()));
             server.createContext("/api/traffic", exchange -> writeResponse(exchange, "application/json; charset=utf-8", TRAFFIC.json()));
+            server.createContext("/api/alerts", exchange -> writeResponse(exchange, "application/json; charset=utf-8", TRAFFIC.alertsJson()));
             server.setExecutor(Executors.newCachedThreadPool(namedFactory("apmlite-http")));
             server.start();
         } catch (IOException e) {
@@ -495,6 +496,8 @@ public class APMLiteAgent {
         private int httpPort = 8161;
         private int maxSlowQueries = 100;
         private int maxTimelinePoints = 60;
+        private long alertHitsPerSecond = 0L;
+        private long alertActiveRequests = 0L;
 
         private void apply(String agentArgs) {
             if (agentArgs == null || agentArgs.trim().isEmpty()) {
@@ -530,6 +533,10 @@ public class APMLiteAgent {
                     maxSlowQueries = Integer.parseInt(value);
                 } else if ("timeline_points".equals(key)) {
                     maxTimelinePoints = Integer.parseInt(value);
+                } else if ("alert_tps".equals(key) || "alert_hits_per_second".equals(key)) {
+                    alertHitsPerSecond = Math.max(0L, Long.parseLong(value));
+                } else if ("alert_active".equals(key) || "alert_active_requests".equals(key)) {
+                    alertActiveRequests = Math.max(0L, Long.parseLong(value));
                 }
             }
         }
@@ -757,6 +764,9 @@ public class APMLiteAgent {
             lastHitsRotateNanos = now;
             long hits = current - previous;
             hitsPerSecond = elapsedNanos <= 0L ? hits : Math.round(hits * (1_000_000_000D / elapsedNanos));
+            for (TrafficStat stat : uriStats.values()) {
+                stat.rotateHitsPerSecond(elapsedNanos);
+            }
             return hitsPerSecond;
         }
 
@@ -785,6 +795,22 @@ public class APMLiteAgent {
                     + "\"uniqueUsersStatus\":\"unknown\","
                     + "\"uris\":" + items
                     + "}";
+        }
+
+        private String alertsJson() {
+            List<String> alerts = new ArrayList<String>();
+            if (CONFIG.alertHitsPerSecond > 0 && hitsPerSecond >= CONFIG.alertHitsPerSecond) {
+                alerts.add("{\"type\":\"HITS\",\"scope\":\"global\",\"value\":" + hitsPerSecond + ",\"threshold\":" + CONFIG.alertHitsPerSecond + "}");
+            }
+            if (CONFIG.alertActiveRequests > 0 && activeRequests.get() >= CONFIG.alertActiveRequests) {
+                alerts.add("{\"type\":\"CONCURRENCY\",\"scope\":\"global\",\"value\":" + activeRequests.get() + ",\"threshold\":" + CONFIG.alertActiveRequests + "}");
+            }
+            for (TrafficStat stat : uriStats.values()) {
+                if (CONFIG.alertHitsPerSecond > 0 && stat.hitsPerSecond >= CONFIG.alertHitsPerSecond) {
+                    alerts.add("{\"type\":\"HITS\",\"scope\":\"" + escapeJson(stat.uri) + "\",\"value\":" + stat.hitsPerSecond + ",\"threshold\":" + CONFIG.alertHitsPerSecond + "}");
+                }
+            }
+            return "{\"status\":\"" + (alerts.isEmpty() ? "OK" : "ALERT") + "\",\"alerts\":[" + String.join(",", alerts) + "]}";
         }
 
         private String requestUri(Object request) {
@@ -816,6 +842,8 @@ public class APMLiteAgent {
         private final AtomicLong totalNanos = new AtomicLong();
         private final AtomicLong maxNanos = new AtomicLong();
         private final AtomicLong errors = new AtomicLong();
+        private final AtomicLong lastHitsBase = new AtomicLong();
+        private volatile long hitsPerSecond;
 
         private TrafficStat(String uri) { this.uri = uri; }
 
@@ -838,6 +866,13 @@ public class APMLiteAgent {
         private double averageMs() {
             long count = hits.get();
             return count == 0 ? 0D : (totalNanos.get() / 1_000_000D) / count;
+        }
+
+        private void rotateHitsPerSecond(long elapsedNanos) {
+            long current = hits.get();
+            long previous = lastHitsBase.getAndSet(current);
+            long delta = current - previous;
+            hitsPerSecond = elapsedNanos <= 0L ? delta : Math.round(delta * (1_000_000_000D / elapsedNanos));
         }
     }
 
