@@ -435,6 +435,7 @@ public class APMLiteAgent {
                 + "@media (max-width:920px){.split{grid-template-columns:1fr}.hero{align-items:start;flex-direction:column}}"
                 + "</style></head><body><div class=\"wrap\">"
                 + "<div class=\"hero\"><div><h1>APMLite Agent</h1><p>Lightweight JVM APM dashboard</p></div><div class=\"muted\">Service <span id=\"service\">-</span></div></div>"
+                + "<div class=\"card\" style=\"margin-bottom:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap\"><strong>Operations view</strong><a class=\"pill ok\" href=\"#wasTraffic\">WAS</a><a class=\"pill ok\" href=\"#sqlPanel\">SQL</a><a class=\"pill ok\" href=\"#errorPanel\">Errors</a><a class=\"pill ok\" href=\"#collectorPanel\">Collector</a><span class=\"muted\">Auto refresh 2s</span></div>"
                 + "<div class=\"grid\">"
                 + "<div class=\"card\"><div class=\"label\">Heap Usage</div><div class=\"value\" id=\"heapPct\">-</div><div class=\"muted\" id=\"heapDetail\">-</div></div>"
                 + "<div class=\"card\"><div class=\"label\">QPS</div><div class=\"value\" id=\"qps\">-</div><div class=\"muted\">Queries per second from the latest sample</div></div>"
@@ -444,16 +445,16 @@ public class APMLiteAgent {
                 + "<div class=\"card\"><div class=\"label\">GC</div><div class=\"value\" id=\"gcCount\">-</div><div class=\"muted\" id=\"gcTime\">-</div></div>"
                 + "<div class=\"card\"><div class=\"label\">Agent Health</div><div class=\"value\" id=\"healthState\">-</div><div class=\"muted\" id=\"healthAge\">-</div></div>"
                 + "</div>"
-                + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">WAS Traffic</div><div class=\"metric-list\"><div><span class=\"muted\">TPS</span><strong id=\"trafficTps\">-</strong></div><div><span class=\"muted\">Active</span><strong id=\"trafficActive\">-</strong></div><div><span class=\"muted\">Errors</span><strong id=\"trafficErrorRate\">-</strong></div><div><span class=\"muted\">Users</span><strong id=\"trafficUsers\">Unknown</strong></div><div><span class=\"muted\">Alerts</span><strong id=\"alertState\">-</strong></div></div><table class=\"table\"><thead><tr><th>URI</th><th>Hits</th><th>Avg</th><th>Max</th><th>Errors</th></tr></thead><tbody id=\"trafficRows\"></tbody></table></div>"
+                + "<div id=\"wasTraffic\" class=\"card\" style=\"margin-top:14px\"><div class=\"label\">WAS Traffic</div><input id=\"uriFilter\" placeholder=\"Filter URI\" style=\"float:right;background:var(--panel2);border:1px solid rgba(154,176,211,.3);color:var(--text);padding:6px 9px;border-radius:8px\"><div class=\"metric-list\"><div><span class=\"muted\">TPS</span><strong id=\"trafficTps\">-</strong></div><div><span class=\"muted\">Active</span><strong id=\"trafficActive\">-</strong></div><div><span class=\"muted\">Errors</span><strong id=\"trafficErrorRate\">-</strong></div><div><span class=\"muted\">Users</span><strong id=\"trafficUsers\">Unknown</strong></div><div><span class=\"muted\">Alerts</span><strong id=\"alertState\">-</strong></div></div><table class=\"table\"><thead><tr><th>URI</th><th>Hits</th><th>Avg</th><th>P95</th><th>Max</th><th>Errors</th></tr></thead><tbody id=\"trafficRows\"></tbody></table></div>"
                 + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">WAS Trend</div><div class=\"muted\">Recent TPS and active request samples · numeric labels are TPS</div><div id=\"trafficTrend\" class=\"trend-points\"></div></div>"
-                + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Active Alerts</div><table class=\"table\"><thead><tr><th>Type</th><th>Scope</th><th>Value</th><th>Threshold</th></tr></thead><tbody id=\"alertRows\"></tbody></table></div>"
+                + "<div id=\"alertsPanel\" class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Active Alerts</div><table class=\"table\"><thead><tr><th>Type</th><th>Scope</th><th>Value</th><th>Threshold</th></tr></thead><tbody id=\"alertRows\"></tbody></table></div>"
                 + "<div class=\"split\">"
                 + "<div class=\"card\"><div class=\"label\">Heap Timeline</div><div id=\"timeline\"></div></div>"
                 + "<div class=\"card\"><div class=\"label\">Top SQL</div><table class=\"table\"><thead><tr><th>SQL</th><th>Count</th><th>Avg</th><th>Max</th></tr></thead><tbody id=\"sqlTop\"></tbody></table></div>"
                 + "</div>"
-                + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Recent Slow Queries</div><table class=\"table\"><thead><tr><th>Time</th><th>Status</th><th>Duration</th><th>SQL</th></tr></thead><tbody id=\"slowRows\"></tbody></table></div>"
-                + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Recent Exceptions and HTTP Errors</div><table class=\"table\"><thead><tr><th>Time</th><th>URI</th><th>Status</th><th>Message</th></tr></thead><tbody id=\"errorRows\"></tbody></table></div>"
-                + "<div class=\"split\"><div class=\"card\"><div class=\"label\">SQL Execution Timeline</div><div class=\"muted\">Green &lt; 3s · Yellow 3–10s · Red ≥ 10s · Purple error</div><div id=\"sqlPoints\" class=\"sql-points\"></div></div><div class=\"card\"><div class=\"label\">Collector</div><div class=\"metric-list\"><div><span class=\"muted\">Queue</span><strong id=\"collectorQueue\">-</strong></div><div><span class=\"muted\">Dropped</span><strong id=\"collectorDropped\">-</strong></div><div><span class=\"muted\">Sent</span><strong id=\"collectorSent\">-</strong></div></div></div></div>"
+                + "<div id=\"sqlPanel\" class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Recent Slow Queries</div><table class=\"table\"><thead><tr><th>Time</th><th>Status</th><th>Duration</th><th>SQL</th></tr></thead><tbody id=\"slowRows\"></tbody></table></div>"
+                + "<div id=\"errorPanel\" class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Recent Exceptions and HTTP Errors</div><table class=\"table\"><thead><tr><th>Time</th><th>URI</th><th>Status</th><th>Message</th></tr></thead><tbody id=\"errorRows\"></tbody></table></div>"
+                + "<div class=\"split\"><div class=\"card\"><div class=\"label\">SQL Execution Timeline</div><div class=\"muted\">Green &lt; 3s · Yellow 3–10s · Red ≥ 10s · Purple error</div><div id=\"sqlPoints\" class=\"sql-points\"></div></div><div id=\"collectorPanel\" class=\"card\"><div class=\"label\">Collector</div><div class=\"metric-list\"><div><span class=\"muted\">Queue</span><strong id=\"collectorQueue\">-</strong></div><div><span class=\"muted\">Dropped</span><strong id=\"collectorDropped\">-</strong></div><div><span class=\"muted\">Sent</span><strong id=\"collectorSent\">-</strong></div></div></div></div>"
                 + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Collector History</div><table class=\"table\"><thead><tr><th>Bucket</th><th>Service</th><th>Type</th><th>Count</th><th>Errors</th><th>Max</th></tr></thead><tbody id=\"collectorRows\"></tbody></table></div>"
                 + "</div><script>"
                 + "async function load(){const [overview,timeline,top,slow,traffic,alerts,sqlTimeline,collector,errors,trafficTimeline,collectorSummary,health]=await Promise.all([fetch('/api/overview').then(r=>r.json()),fetch('/api/timeline').then(r=>r.json()),fetch('/api/sql/top').then(r=>r.json()),fetch('/api/sql/slow').then(r=>r.json()),fetch('/api/traffic').then(r=>r.json()),fetch('/api/alerts').then(r=>r.json()),fetch('/api/sql/timeline').then(r=>r.json()),fetch('/api/collector/status').then(r=>r.json()),fetch('/api/traffic/errors').then(r=>r.json()),fetch('/api/traffic/timeline').then(r=>r.json()),fetch('/api/collector/summary').then(r=>r.json()),fetch('/api/health').then(r=>r.json())]);"
@@ -468,7 +469,7 @@ public class APMLiteAgent {
                 + "document.getElementById('slowCount').textContent=overview.slowQueryCount;"
                 + "document.getElementById('gcCount').textContent=overview.gcCount;document.getElementById('gcTime').textContent=overview.gcTimeMs+' ms total';document.getElementById('healthState').textContent=health.status;document.getElementById('healthState').className=health.status==='UP'?'pill ok':'pill error';document.getElementById('healthAge').textContent='Sample age '+health.sampleAgeMs+' ms';"
                 + "document.getElementById('trafficTps').textContent=traffic.tps;document.getElementById('trafficActive').textContent=traffic.activeRequests;document.getElementById('trafficErrorRate').textContent=traffic.errorRatePercent.toFixed(2)+'%';document.getElementById('trafficUsers').textContent=traffic.uniqueUsersStatus==='unknown'?'Unknown':traffic.uniqueUsers;document.getElementById('alertState').textContent=alerts.status;document.getElementById('alertState').className=alerts.status==='ALERT'?'pill error':'pill ok';"
-                + "document.getElementById('trafficRows').innerHTML=traffic.uris.map(i=>'<tr><td>'+escapeHtml(i.uri)+'</td><td>'+i.hits+'</td><td>'+i.avgMs.toFixed(1)+' ms</td><td>'+i.maxMs+' ms</td><td>'+i.errors+' ('+i.errorRatePercent.toFixed(1)+'%)</td></tr>').join('')||'<tr><td colspan=\"5\" class=\"muted\">No HTTP traffic captured yet.</td></tr>';document.getElementById('alertRows').innerHTML=alerts.alerts.map(a=>'<tr><td><span class=\"pill error\">'+a.type+'</span></td><td>'+escapeHtml(a.scope)+'</td><td>'+a.value+'</td><td>'+a.threshold+'</td></tr>').join('')||'<tr><td colspan=\"4\" class=\"muted\">No active alerts.</td></tr>';"
+                + "const uriFilter=(document.getElementById('uriFilter').value||'').toLowerCase();document.getElementById('trafficRows').innerHTML=traffic.uris.filter(i=>i.uri.toLowerCase().includes(uriFilter)).map(i=>'<tr><td>'+escapeHtml(i.uri)+'</td><td>'+i.hits+'</td><td>'+i.avgMs.toFixed(1)+' ms</td><td>'+i.p95Ms.toFixed(1)+' ms</td><td>'+i.maxMs+' ms</td><td>'+i.errors+' ('+i.errorRatePercent.toFixed(1)+'%)</td></tr>').join('')||'<tr><td colspan=\"6\" class=\"muted\">No matching HTTP traffic.</td></tr>';document.getElementById('alertRows').innerHTML=alerts.alerts.map(a=>'<tr><td><span class=\"pill error\">'+a.type+'</span></td><td>'+escapeHtml(a.scope)+'</td><td>'+a.value+'</td><td>'+a.threshold+'</td></tr>').join('')||'<tr><td colspan=\"4\" class=\"muted\">No active alerts.</td></tr>';"
                 + "const max=Math.max(...timeline.points.map(p=>p.heapUsagePct),1);document.getElementById('timeline').innerHTML=timeline.points.map(p=>'<div class=\"bar\" title=\"'+p.heapUsagePct.toFixed(1)+'%\" style=\"height:'+Math.max(8,(p.heapUsagePct/max)*100)+'%\"></div>').join('');"
                 + "document.getElementById('sqlTop').innerHTML=top.items.map(i=>'<tr><td>'+escapeHtml(i.sql)+'</td><td>'+i.count+'</td><td>'+i.avgMs.toFixed(1)+' ms</td><td>'+i.maxMs+' ms</td></tr>').join('')||'<tr><td colspan=\"4\" class=\"muted\">No SQL data has been captured yet.</td></tr>';"
                 + "document.getElementById('slowRows').innerHTML=slow.items.map(i=>'<tr><td>'+new Date(i.timestamp).toLocaleTimeString()+'</td><td><span class=\"pill '+i.status.toLowerCase()+'\">'+i.status+'</span></td><td>'+i.durationMs+' ms</td><td>'+escapeHtml(i.sql)+'</td></tr>').join('')||'<tr><td colspan=\"4\" class=\"muted\">No slow queries have been captured recently.</td></tr>';"
@@ -936,6 +937,7 @@ public class APMLiteAgent {
                         .append("\"hits\":").append(stat.hits.get()).append(',')
                         .append("\"active\":").append(stat.active.get()).append(',')
                         .append("\"avgMs\":").append(formatDouble(stat.averageMs())).append(',')
+                        .append("\"p95Ms\":").append(formatDouble(stat.p95Ms())).append(',')
                         .append("\"maxMs\":").append(TimeUnit.NANOSECONDS.toMillis(stat.maxNanos.get())).append(',')
                         .append("\"errors\":").append(stat.errors.get()).append(',')
                         .append("\"errorRatePercent\":").append(formatDouble(stat.errorRatePercent)).append('}');
@@ -1055,6 +1057,7 @@ public class APMLiteAgent {
         private final AtomicLong totalNanos = new AtomicLong();
         private final AtomicLong maxNanos = new AtomicLong();
         private final AtomicLong errors = new AtomicLong();
+        private final Deque<Long> durationSamples = new ConcurrentLinkedDeque<Long>();
         private final AtomicLong lastHitsBase = new AtomicLong();
         private final AtomicLong lastErrorsBase = new AtomicLong();
         private volatile long hitsPerSecond;
@@ -1066,6 +1069,8 @@ public class APMLiteAgent {
             hits.incrementAndGet();
             totalNanos.addAndGet(durationNanos);
             updateMax(durationNanos);
+            durationSamples.addLast(durationNanos);
+            while (durationSamples.size() > 128) durationSamples.pollFirst();
             if (error) errors.incrementAndGet();
         }
 
@@ -1081,6 +1086,14 @@ public class APMLiteAgent {
         private double averageMs() {
             long count = hits.get();
             return count == 0 ? 0D : (totalNanos.get() / 1_000_000D) / count;
+        }
+
+        private double p95Ms() {
+            List<Long> values = new ArrayList<Long>(durationSamples);
+            if (values.isEmpty()) return 0D;
+            Collections.sort(values);
+            int index = Math.min(values.size() - 1, (int) Math.ceil(values.size() * 0.95D) - 1);
+            return values.get(index) / 1_000_000D;
         }
 
         private void rotateHitsPerSecond(long elapsedNanos) {
