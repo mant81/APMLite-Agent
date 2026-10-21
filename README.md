@@ -1,262 +1,84 @@
 # APMLite Agent
 
-`APMLite Agent` is a lightweight Java APM prototype that provides a production-oriented monitoring experience.
+Java `-javaagent` 기반 WAS·JVM·SQL 모니터링 에이전트다. 요청 처리 경로에서 원격 DB 저장을 수행하지 않으며, 관측 실패 시 데이터를 버리고 서비스 실행을 우선한다.
 
-It runs as a `-javaagent`, instruments JDBC `PreparedStatement` execution, collects JVM metrics, and exposes a built-in live dashboard over HTTP.
-
-## What It Does
-
-- Collects JVM metrics: heap, non-heap, thread count, class count, GC, uptime, CPU
-- Tracks SQL execution counts, average latency, max latency, and error counts
-- Detects slow queries and keeps a recent in-memory event list
-- Serves a simple real-time dashboard on `http://127.0.0.1:8161` (or `/monitor`)
-- Optionally persists metric snapshots and slow queries into MariaDB
-
-## Project Layout
-
-```text
-src/main/java/com/sschoi/APMLiteAgent.java
-pom.xml
-README.md
-```
-
-<<<<<<< HEAD
-```
-apmlite-agent/
-├── src/main/java/com/sschoi/APMLiteAgent.java
-├── pom.xml
-├── README.md
-└── target/apmlite-agent-1.0.0.jar
-```
-
----
-
-## ⚙️ pom.xml (최종)
-
-```xml
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
-         http://maven.apache.org/xsd/maven-4.0.0.xsd">
-    <modelVersion>4.0.0</modelVersion>
-    <groupId>com.sschoi</groupId>
-    <artifactId>apmlite-agent</artifactId>
-    <version>1.0.0</version>
-    <packaging>jar</packaging>
-    <name>APMLite Agent</name>
-
-    <dependencies>
-        <dependency>
-            <groupId>net.bytebuddy</groupId>
-            <artifactId>byte-buddy</artifactId>
-            <version>1.14.12</version>
-        </dependency>
-        <dependency>
-            <groupId>net.bytebuddy</groupId>
-            <artifactId>byte-buddy-agent</artifactId>
-            <version>1.14.12</version>
-        </dependency>
-        <dependency>
-            <groupId>org.mariadb.jdbc</groupId>
-            <artifactId>mariadb-java-client</artifactId>
-            <version>2.7.9</version>
-        </dependency>
-    </dependencies>
-
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-shade-plugin</artifactId>
-                <version>3.4.1</version>
-                <executions>
-                    <execution>
-                        <phase>package</phase>
-                        <goals><goal>shade</goal></goals>
-                        <configuration>
-                            <createDependencyReducedPom>false</createDependencyReducedPom>
-                            <transformers>
-                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <manifestEntries>
-                                        <Premain-Class>com.sschoi.APMLiteAgent</Premain-Class>
-                                        <Can-Redefine-Classes>true</Can-Redefine-Classes>
-                                        <Can-Retransform-Classes>true</Can-Retransform-Classes>
-                                    </manifestEntries>
-                                </transformer>
-                            </transformers>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-        </plugins>
-    </build>
-</project>
-```
----
-
-## 🧩 빌드 방법
-```
-mvn clean package
-```
-
-- 결과 파일: target/apmlite-agent-1.0.0.jar
-- 모든 의존성 포함된 Fat JAR 생성
-
----
-=======
-## Build
+## 빌드
 
 ```bash
-mvn clean package
+mvn -B test
+mvn -B package
 ```
 
-Output jar:
+결과물은 `target/apmlite-agent-1.1.0.jar`이다.
 
-```text
-target/apmlite-agent-1.1.0.jar
-```
+## 기동
 
-## Run
->>>>>>> 1
-
-Example:
-
-<<<<<<< HEAD
-Java 애플리케이션 실행 시 -javaagent 옵션 추가:
-
-```
-java -javaagent:/path/to/apmlite-agent-1.0.0.jar=use_db=true;db_url=jdbc:mariadb://localhost:3306/monitor;db_user=user;db_pass=password -jar myapp.jar
-```
-
----
-=======
 ```bash
-java -javaagent:target/apmlite-agent-1.1.0.jar=service=order-api;http_port=8161;slow_ms=300;use_db=false -jar myapp.jar
+java -javaagent:target/apmlite-agent-1.1.0.jar=service=order-api;http_port=8161;sample_ms=2000;slow_ms=300 -jar myapp.jar
 ```
 
-Then open:
+관리자 UI: `http://127.0.0.1:8161/monitor`
 
-```text
-http://127.0.0.1:8161
-http://127.0.0.1:8161/monitor
-```
->>>>>>> 1
+기본 바인딩은 loopback이며, 외부 공개가 필요한 경우 별도 인증·접근제어 프록시를 둔다.
 
-Health check endpoint:
+## Agent 옵션
 
-```text
-http://127.0.0.1:8161/api/health
-```
-
-<<<<<<< HEAD
-**예시:**
-```bash
--javaagent:apmlite-agent.jar=use_db=true;slow_ms=500;use_log=true
-```
-
----
-=======
-## Agent Options
-
-| Option | Default | Description |
+| 옵션 | 기본값 | 설명 |
 |---|---:|---|
-| `service` or `service_name` | `demo-service` | Service name shown in the dashboard |
-| `http_port` | `8161` | Embedded dashboard port |
-| `slow_ms` | `300` | Slow query threshold in milliseconds |
-| `sample_ms` or `interval` | `2000` | JVM sampling interval in milliseconds |
-| `use_db` | `false` | Persist data to MariaDB |
-| `db_url` | `jdbc:mariadb://localhost:3306/apm_lite` | MariaDB JDBC URL |
-| `db_user` | `root` | Database username |
-| `db_pass` | `admin` | Database password |
-| `use_log` | `true` | Print agent logs to stdout |
-| `max_slow_queries` | `100` | Number of recent slow/error queries kept in memory |
-| `timeline_points` | `60` | Number of dashboard history points kept in memory |
+| `service` / `service_name` | `demo-service` | 서비스 표시 이름 |
+| `http_port` | `8161` | 관리자 UI/API 포트 |
+| `sample_ms` / `interval` | `2000` | JVM·WAS 샘플 주기(ms) |
+| `slow_ms` | `300` | 느린 SQL 기준(ms) |
+| `alert_tps` | `0` | TPS 경고 기준, 0은 비활성화 |
+| `alert_active` | `0` | 동시 요청 경고 기준 |
+| `alert_error_percent` | `0` | 오류율 경고 기준(%) |
+| `collector_url` | 빈 값 | Collector 수신 주소 |
+| `collector_queue_size` | `1000` | Agent 전송 큐 상한 |
+| `max_slow_queries` | `100` | 최근 느린 SQL 메모리 보관 건수 |
+| `use_log` | `true` | Agent 로그 출력 |
 
-Example with DB persistence:
+## 관리자 UI와 API
+
+- `/api/health`: Agent 상태와 최신 샘플 지연
+- `/api/overview`: Heap, CPU, Thread, GC, QPS
+- `/api/traffic`: 전체·URI별 히트, TPS, 동시 요청, 응답시간, 오류율
+- `/api/traffic/timeline`: WAS TPS·동시 요청·오류율 추이
+- `/api/traffic/errors`: 최근 예외·HTTP 5xx 목록(최대 200건)
+- `/api/sql/top`: SQL별 건수·평균·최대 실행시간
+- `/api/sql/slow`: 최근 느린 SQL과 SQL 오류
+- `/api/sql/timeline`: 실행시간 색상 점 데이터
+- `/api/alerts`: TPS·동시성·오류율 경고
+- `/api/collector/status`: Agent 큐와 전송 통계
+- `/api/collector/summary`: Collector 시간 버킷 이력
+
+SQL 점 색상은 3초 미만 초록, 3초 이상 10초 미만 노랑, 10초 이상 빨강, 오류 보라색이다. SQL 바인딩 값은 수집하지 않는다.
+
+## Collector
 
 ```bash
-java -javaagent:target/apmlite-agent-1.1.0.jar=service=payment-api;use_db=true;db_url=jdbc:mariadb://localhost:3306/apm_lite;db_user=root;db_pass=admin -jar myapp.jar
-```
->>>>>>> 1
-
-## Database Tables
-
-<<<<<<< HEAD
-```sql
-CREATE TABLE IF NOT EXISTS apm_query_log (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '고유 식별자',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '로그 시각',
-    query_text TEXT COMMENT '실행된 SQL 쿼리',
-    exec_time_ms BIGINT COMMENT '실행 시간 (ms)',
-    threshold_ms INT COMMENT '기준 임계치 (ms)',
-    status VARCHAR(10) COMMENT 'Slow / Normal',
-    INDEX idx_created_at (created_at),
-    INDEX idx_status (status)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='APMLite SQL 실행 로그';
+APMLITE_COLLECTOR_PORT=9000 APMLITE_COLLECTOR_DB=/var/lib/apmlite/collector.db \
+  python3 collector/apmlite_collector.py
 ```
 
----
+Agent 설정: `collector_url=http://127.0.0.1:9000/events;collector_queue_size=1000`
 
-## 📊 콘솔 출력 예시
+Collector는 `JVM`, `SQL`, `TRAFFIC` 배치를 받아 1분 버킷 집계와 최근 1,000건 샘플만 SQLite에 저장한다. 큐가 가득 차면 이벤트를 폐기하고 202로 응답한다. 자세한 내용은 [collector/README.md](collector/README.md)를 참조한다.
 
+## 저장·보안·호환성 원칙
+
+- 요청 스레드에서 DB 연결·저장을 수행하지 않는다.
+- Agent와 Collector 큐는 bounded이며, 전송 실패 시 재시도 폭주를 만들지 않는다.
+- SQL 파라미터, 비밀번호, 토큰, 사용자 식별자를 저장하지 않는다.
+- 사용자 식별자가 없으면 접속자 수를 `Unknown`으로 표시한다.
+- Agent 기능 장애가 대상 서비스 예외·지연·스레드 고갈로 전파되지 않아야 한다.
+- Java 8 바이트코드로 컴파일하며 Java 8 이상에서 실행한다.
+
+## 검증
+
+```bash
+mvn -B test
+mvn -B package
+python3 -m py_compile collector/apmlite_collector.py
 ```
-[APMLite] Agent started successfully.
-[APMLite] Captured SlowQuery: 324ms
-SQL: SELECT * FROM users WHERE id = ?
-```
 
----
-
-## ⚠️ 안정성 및 주의사항
-
-- 모든 JDBC 호출은 Proxy 객체로 감싸지만, 원본 PreparedStatement를 그대로 위임하므로 성능 저하 최소화
-- DB 장애 시에도 메인 서비스는 영향을 받지 않음 (로그만 경고 출력)
-- Thread-safe하게 동작
-- ByteBuddy Agent는 클래스 로드 시점에만 개입하므로 런타임 영향 거의 없음
-
----
-
-## 🧑‍💻 개발 정보
-
-| 항목         | 내용                         |
-| ---------- | -------------------------- |
-| Language   | Java 8 이상                  |
-| Build Tool | Maven                      |
-| Database   | MariaDB                    |
-| Agent Type | Java Agent (Premain-Class) |
-| Library    | ByteBuddy                  |
-| Version    | 1.0.0                      |
-| License    | MIT                        |
-
----
-
-
-## 📄 License
-```
-MIT License
-Copyright (c) 2025
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files...
-```
-=======
-When `use_db=true`, the agent creates these tables automatically if they do not already exist:
-
-- `apm_metric_samples`
-- `apm_slow_queries`
-
-## Monitoring Direction
-
-This is still a lightweight prototype, but it now has the core shape of an APM tool:
->>>>>>> 1
-
-- agent-based collection
-- near-real-time metric view
-- slow query analysis
-- top SQL aggregation
-- service-level dashboard
-
-## Next Recommended Steps
-
-- Add servlet or Spring controller tracing to measure transactions
-- Capture external calls such as Redis, HTTP clients, and Kafka
-- Add alert rules for heap, QPS drop, and slow query bursts
-- Split collector/dashboard from the agent so multiple JVMs can report centrally
+실제 JVM smoke에서는 `-javaagent` 기동, HTTP 계측, health·overview·traffic·SQL API를 확인한다. 테스트 환경에서 네트워크 바인딩이 제한된 경우에는 JVM 계측과 API 생성 검증을 분리해 수행한다.
