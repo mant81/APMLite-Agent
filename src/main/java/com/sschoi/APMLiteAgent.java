@@ -7,6 +7,8 @@ import net.bytebuddy.asm.Advice;
 import net.bytebuddy.matcher.ElementMatchers;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.lang.instrument.Instrumentation;
 import java.lang.management.ClassLoadingMXBean;
@@ -259,6 +261,7 @@ public class APMLiteAgent {
             server.createContext("/api/traffic/timeline", exchange -> writeResponse(exchange, "application/json; charset=utf-8", TRAFFIC.timelineJson()));
             server.createContext("/api/alerts", exchange -> writeResponse(exchange, "application/json; charset=utf-8", TRAFFIC.alertsJson()));
             server.createContext("/api/collector/status", exchange -> writeResponse(exchange, "application/json; charset=utf-8", COLLECTOR.statusJson()));
+            server.createContext("/api/collector/summary", exchange -> writeResponse(exchange, "application/json; charset=utf-8", COLLECTOR.summaryJson()));
             server.setExecutor(Executors.newCachedThreadPool(namedFactory("apmlite-http")));
             server.start();
         } catch (IOException e) {
@@ -448,8 +451,9 @@ public class APMLiteAgent {
                 + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Recent Slow Queries</div><table class=\"table\"><thead><tr><th>Time</th><th>Status</th><th>Duration</th><th>SQL</th></tr></thead><tbody id=\"slowRows\"></tbody></table></div>"
                 + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Recent Exceptions and HTTP Errors</div><table class=\"table\"><thead><tr><th>Time</th><th>URI</th><th>Status</th><th>Message</th></tr></thead><tbody id=\"errorRows\"></tbody></table></div>"
                 + "<div class=\"split\"><div class=\"card\"><div class=\"label\">SQL Execution Timeline</div><div class=\"muted\">Green &lt; 3s · Yellow 3–10s · Red ≥ 10s · Purple error</div><div id=\"sqlPoints\" class=\"sql-points\"></div></div><div class=\"card\"><div class=\"label\">Collector</div><div class=\"metric-list\"><div><span class=\"muted\">Queue</span><strong id=\"collectorQueue\">-</strong></div><div><span class=\"muted\">Dropped</span><strong id=\"collectorDropped\">-</strong></div><div><span class=\"muted\">Sent</span><strong id=\"collectorSent\">-</strong></div></div></div></div>"
+                + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Collector History</div><table class=\"table\"><thead><tr><th>Bucket</th><th>Service</th><th>Type</th><th>Count</th><th>Errors</th><th>Max</th></tr></thead><tbody id=\"collectorRows\"></tbody></table></div>"
                 + "</div><script>"
-                + "async function load(){const [overview,timeline,top,slow,traffic,alerts,sqlTimeline,collector,errors,trafficTimeline]=await Promise.all([fetch('/api/overview').then(r=>r.json()),fetch('/api/timeline').then(r=>r.json()),fetch('/api/sql/top').then(r=>r.json()),fetch('/api/sql/slow').then(r=>r.json()),fetch('/api/traffic').then(r=>r.json()),fetch('/api/alerts').then(r=>r.json()),fetch('/api/sql/timeline').then(r=>r.json()),fetch('/api/collector/status').then(r=>r.json()),fetch('/api/traffic/errors').then(r=>r.json()),fetch('/api/traffic/timeline').then(r=>r.json())]);"
+                + "async function load(){const [overview,timeline,top,slow,traffic,alerts,sqlTimeline,collector,errors,trafficTimeline,collectorSummary]=await Promise.all([fetch('/api/overview').then(r=>r.json()),fetch('/api/timeline').then(r=>r.json()),fetch('/api/sql/top').then(r=>r.json()),fetch('/api/sql/slow').then(r=>r.json()),fetch('/api/traffic').then(r=>r.json()),fetch('/api/alerts').then(r=>r.json()),fetch('/api/sql/timeline').then(r=>r.json()),fetch('/api/collector/status').then(r=>r.json()),fetch('/api/traffic/errors').then(r=>r.json()),fetch('/api/traffic/timeline').then(r=>r.json()),fetch('/api/collector/summary').then(r=>r.json())]);"
                 + "document.getElementById('service').textContent=overview.serviceName;"
                 + "document.getElementById('heapPct').textContent=overview.heapUsagePct.toFixed(1)+'%';"
                 + "document.getElementById('heapDetail').textContent=overview.heapUsedMb.toFixed(1)+' MB / '+overview.heapMaxMb.toFixed(1)+' MB';"
@@ -467,6 +471,7 @@ public class APMLiteAgent {
                 + "document.getElementById('errorRows').innerHTML=errors.items.map(i=>'<tr><td>'+new Date(i.timestamp).toLocaleTimeString()+'</td><td>'+escapeHtml(i.uri)+'</td><td><span class=\"pill error\">'+i.status+'</span></td><td>'+escapeHtml(i.message)+'</td></tr>').join('')||'<tr><td colspan=\"4\" class=\"muted\">No exceptions or HTTP 5xx errors captured recently.</td></tr>';"
                 + "document.getElementById('sqlPoints').innerHTML=sqlTimeline.points.slice(-120).map(p=>'<span class=\"sql-point '+p.color+'\" title=\"'+p.durationMs+' ms · '+escapeHtml(p.sql)+'\"></span>').join('')||'<span class=\"muted\">No SQL timeline data yet.</span>';document.getElementById('collectorQueue').textContent=collector.queueSize+'/'+collector.capacity;document.getElementById('collectorDropped').textContent=collector.dropped;document.getElementById('collectorSent').textContent=collector.sent;"
                 + "const maxTps=Math.max(...trafficTimeline.points.map(p=>p.tps),1);document.getElementById('trafficTrend').innerHTML=trafficTimeline.points.slice(-120).map(p=>'<span class=\"sql-point green\" style=\"height:'+Math.max(8,(p.tps/maxTps)*80)+'px\" title=\"TPS '+p.tps+' · Active '+p.activeRequests+' · Error '+p.errorRatePercent.toFixed(2)+'%\"></span>').join('')||'<span class=\"muted\">No WAS trend data yet.</span>';"
+                + "document.getElementById('collectorRows').innerHTML=(collectorSummary.items||[]).slice(0,100).map(i=>'<tr><td>'+new Date(i.bucket).toLocaleString()+'</td><td>'+escapeHtml(i.service)+'</td><td>'+escapeHtml(i.type)+'</td><td>'+i.count+'</td><td>'+i.errors+'</td><td>'+i.maxDurationMs+' ms</td></tr>').join('')||'<tr><td colspan=\"6\" class=\"muted\">Collector history unavailable or empty.</td></tr>';"
                 + "}function escapeHtml(v){return String(v||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');}load();setInterval(load,2000);"
                 + "</script></body></html>";
     }
@@ -487,6 +492,14 @@ public class APMLiteAgent {
         if (CONFIG.useLog) {
             System.out.println("[APMLiteAgent] " + message);
         }
+    }
+
+    private static byte[] readAll(InputStream input) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        byte[] buffer = new byte[4096];
+        int count;
+        while ((count = input.read(buffer)) >= 0) output.write(buffer, 0, count);
+        return output.toByteArray();
     }
 
     private static final class CollectorBuffer {
@@ -547,6 +560,28 @@ public class APMLiteAgent {
 
         private String statusJson() {
             return "{\"enabled\":" + (!CONFIG.collectorUrl.trim().isEmpty()) + ",\"queueSize\":" + (queue == null ? 0 : queue.size()) + ",\"capacity\":" + CONFIG.collectorQueueSize + ",\"offered\":" + offered.get() + ",\"dropped\":" + dropped.get() + ",\"sent\":" + sent.get() + ",\"sendFailures\":" + sendFailures.get() + "}";
+        }
+
+        private String summaryJson() {
+            if (CONFIG.collectorUrl.trim().isEmpty()) return "{\"enabled\":false,\"items\":[]}";
+            HttpURLConnection connection = null;
+            try {
+                String endpoint = CONFIG.collectorUrl.endsWith("/events")
+                        ? CONFIG.collectorUrl.substring(0, CONFIG.collectorUrl.length() - 7) + "/summary"
+                        : CONFIG.collectorUrl + "/summary";
+                connection = (HttpURLConnection) new URL(endpoint).openConnection();
+                connection.setConnectTimeout(200);
+                connection.setReadTimeout(500);
+                if (connection.getResponseCode() >= 200 && connection.getResponseCode() < 300) {
+                    byte[] bytes = readAll(connection.getInputStream());
+                    return new String(bytes, StandardCharsets.UTF_8);
+                }
+            } catch (Throwable ignored) {
+                // Dashboard history is optional and must never affect the service.
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+            return "{\"enabled\":true,\"items\":[],\"status\":\"unavailable\"}";
         }
     }
 
