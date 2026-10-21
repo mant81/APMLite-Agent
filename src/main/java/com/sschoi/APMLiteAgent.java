@@ -20,6 +20,8 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.net.InetSocketAddress;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -34,6 +36,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -46,6 +50,7 @@ public class APMLiteAgent {
     private static final Config CONFIG = new Config();
     private static final MetricsStore STORE = new MetricsStore();
     private static final TrafficMetrics TRAFFIC = new TrafficMetrics();
+    private static final CollectorBuffer COLLECTOR = new CollectorBuffer();
     private static final ExecutorService DB_EXECUTOR = Executors.newSingleThreadExecutor(namedFactory("apmlite-db"));
     private static final ScheduledExecutorService SCHEDULER = Executors.newScheduledThreadPool(2, namedFactory("apmlite-scheduler"));
 
@@ -62,6 +67,7 @@ public class APMLiteAgent {
         CONFIG.apply(agentArgs);
         log("Starting agent for service '" + CONFIG.serviceName + "'");
 
+        COLLECTOR.start();
         initDatabase();
         startJvmSampler();
         startHttpServer();
@@ -170,6 +176,7 @@ public class APMLiteAgent {
 
                 STORE.setSnapshot(snapshot);
                 STORE.addTimelinePoint(snapshot);
+                COLLECTOR.offer(snapshot);
                 persistSnapshot(snapshot);
             } catch (Exception e) {
                 log("JVM sampler error: " + e.getMessage());
@@ -247,6 +254,7 @@ public class APMLiteAgent {
             server.createContext("/api/sql/timeline", exchange -> writeResponse(exchange, "application/json; charset=utf-8", STORE.sqlTimelineJson()));
             server.createContext("/api/traffic", exchange -> writeResponse(exchange, "application/json; charset=utf-8", TRAFFIC.json()));
             server.createContext("/api/alerts", exchange -> writeResponse(exchange, "application/json; charset=utf-8", TRAFFIC.alertsJson()));
+            server.createContext("/api/collector/status", exchange -> writeResponse(exchange, "application/json; charset=utf-8", COLLECTOR.statusJson()));
             server.setExecutor(Executors.newCachedThreadPool(namedFactory("apmlite-http")));
             server.start();
         } catch (IOException e) {
@@ -345,6 +353,7 @@ public class APMLiteAgent {
                                 event.status = error == null ? "SLOW" : "ERROR";
                                 event.errorMessage = error == null ? null : truncate(error.toString(), 500);
                                 STORE.addSlowQuery(event);
+                                COLLECTOR.offer(event);
                                 persistSlowQuery(event);
 
                                 if (CONFIG.useLog) {
@@ -465,6 +474,63 @@ public class APMLiteAgent {
         }
     }
 
+    private static final class CollectorBuffer {
+        private BlockingQueue<String> queue;
+        private final AtomicLong offered = new AtomicLong();
+        private final AtomicLong dropped = new AtomicLong();
+        private final AtomicLong sent = new AtomicLong();
+        private final AtomicLong sendFailures = new AtomicLong();
+
+        private void start() {
+            queue = new ArrayBlockingQueue<String>(CONFIG.collectorQueueSize);
+            if (CONFIG.collectorUrl.trim().isEmpty()) return;
+            SCHEDULER.scheduleAtFixedRate(this::flush, 1L, 1L, TimeUnit.SECONDS);
+        }
+
+        private void offer(JvmSnapshot snapshot) {
+            offer("{\"type\":\"JVM\",\"service\":\"" + escapeJson(snapshot.serviceName) + "\",\"timestamp\":" + snapshot.timestamp + ",\"heapUsedMb\":" + snapshot.heapUsedMb + ",\"heapUsagePct\":" + snapshot.heapUsagePct + ",\"threadCount\":" + snapshot.threadCount + ",\"queriesPerSec\":" + snapshot.queriesPerSec + "}");
+        }
+
+        private void offer(SlowQueryEvent event) {
+            offer("{\"type\":\"SQL\",\"service\":\"" + escapeJson(CONFIG.serviceName) + "\",\"timestamp\":" + event.timestamp + ",\"durationMs\":" + event.durationMs + ",\"status\":\"" + escapeJson(event.status) + "\",\"sql\":\"" + escapeJson(event.sql) + "\"}");
+        }
+
+        private void offer(String event) {
+            if (CONFIG.collectorUrl.trim().isEmpty()) return;
+            offered.incrementAndGet();
+            if (queue == null || !queue.offer(event)) dropped.incrementAndGet();
+        }
+
+        private void flush() {
+            if (queue == null || queue.isEmpty()) return;
+            List<String> batch = new ArrayList<String>(100);
+            queue.drainTo(batch, 100);
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(CONFIG.collectorUrl).openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(200);
+                connection.setReadTimeout(500);
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Type", "application/json");
+                String body = "[" + String.join(",", batch) + "]";
+                connection.getOutputStream().write(body.getBytes(StandardCharsets.UTF_8));
+                int status = connection.getResponseCode();
+                if (status >= 200 && status < 300) sent.addAndGet(batch.size());
+                else { sendFailures.incrementAndGet(); batch.forEach(this::offer); }
+            } catch (Throwable ignored) {
+                sendFailures.incrementAndGet();
+                batch.forEach(this::offer);
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }
+
+        private String statusJson() {
+            return "{\"enabled\":" + (!CONFIG.collectorUrl.trim().isEmpty()) + ",\"queueSize\":" + (queue == null ? 0 : queue.size()) + ",\"capacity\":" + CONFIG.collectorQueueSize + ",\"offered\":" + offered.get() + ",\"dropped\":" + dropped.get() + ",\"sent\":" + sent.get() + ",\"sendFailures\":" + sendFailures.get() + "}";
+        }
+    }
+
     private static String truncate(String value, int max) {
         if (value == null || value.length() <= max) {
             return value;
@@ -500,6 +566,8 @@ public class APMLiteAgent {
         private long alertHitsPerSecond = 0L;
         private long alertActiveRequests = 0L;
         private double alertErrorPercent = 0D;
+        private String collectorUrl = "";
+        private int collectorQueueSize = 1000;
 
         private void apply(String agentArgs) {
             if (agentArgs == null || agentArgs.trim().isEmpty()) {
@@ -541,6 +609,10 @@ public class APMLiteAgent {
                     alertActiveRequests = Math.max(0L, Long.parseLong(value));
                 } else if ("alert_error_percent".equals(key)) {
                     alertErrorPercent = Math.max(0D, Math.min(100D, Double.parseDouble(value)));
+                } else if ("collector_url".equals(key)) {
+                    collectorUrl = value;
+                } else if ("collector_queue_size".equals(key)) {
+                    collectorQueueSize = Math.max(10, Math.min(100000, Integer.parseInt(value)));
                 }
             }
         }

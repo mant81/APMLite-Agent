@@ -32,4 +32,4 @@ Tomcat + Agent → localhost Collector → Monitoring DB
 - DB 연결·쿼리 타임아웃을 설정한다.
 - 관측 데이터 손실은 허용하지만 서비스 요청 실패·스레드 고갈·지속적인 지연 증가는 허용하지 않는다.
 
-현재 구현은 Agent에서 DB 작업을 직접 생성하는 `use_db=true` 경로이므로, Collector 분리 전까지는 실험용으로만 사용한다. 다음 구현 단계는 localhost HTTP 또는 Unix socket 기반 Collector와 bounded queue를 추가하는 것이다.
+Agent에는 `collector_url`을 지정할 수 있는 bounded 메모리 버퍼가 추가되었다. `collector_url`이 설정되면 JVM·느린 SQL 이벤트를 비차단 `offer`로 버퍼링하고 1초 배치로 HTTP POST한다. 전송 실패나 큐 포화 시 이벤트를 폐기하며 `/api/collector/status`에서 큐·폐기·전송 통계를 확인한다. 기본값은 비활성화이며, 기존 `use_db=true` 직접 저장 경로는 호환성을 위한 실험용으로만 사용한다.
