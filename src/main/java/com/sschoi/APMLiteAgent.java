@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import net.bytebuddy.agent.builder.AgentBuilder;
 import net.bytebuddy.asm.Advice;
+import net.bytebuddy.implementation.bytecode.assign.Assigner;
 import net.bytebuddy.matcher.ElementMatchers;
 
 import java.io.IOException;
@@ -53,16 +54,25 @@ public class APMLiteAgent {
     private static final MetricsStore STORE = new MetricsStore();
     private static final TrafficMetrics TRAFFIC = new TrafficMetrics();
     private static final CollectorBuffer COLLECTOR = new CollectorBuffer();
+    private static final ThreadLocal<HttpRequestContext> HTTP_CONTEXT = new ThreadLocal<HttpRequestContext>();
     private static final ExecutorService DB_EXECUTOR = Executors.newSingleThreadExecutor(namedFactory("apmlite-db"));
     private static final ScheduledExecutorService SCHEDULER = Executors.newScheduledThreadPool(2, namedFactory("apmlite-scheduler"));
 
     public static void recordHttpEnter(Object request) {
-        TRAFFIC.enter(request);
+        try {
+            TRAFFIC.enter(request);
+        } catch (Throwable ignored) {
+            // Metrics must never interfere with request processing.
+        }
     }
 
     public static void recordHttpExit(Object request, Object response, long durationNanos, Throwable thrown) {
-        TRAFFIC.exit();
-        TRAFFIC.observe(request, response, durationNanos, thrown);
+        try {
+            TRAFFIC.exit();
+            TRAFFIC.observe(request, response, durationNanos, thrown);
+        } catch (Throwable ignored) {
+            // Metrics must never interfere with request processing.
+        }
     }
 
     public static void premain(String agentArgs, Instrumentation inst) {
@@ -72,11 +82,23 @@ public class APMLiteAgent {
         COLLECTOR.start();
         initDatabase();
         startJvmSampler();
-        startHttpServer();
         installJdbcInstrumentation(inst);
         installHttpInstrumentation(inst);
+        installSpringMvcInstrumentation(inst);
+        installWebFluxInstrumentation(inst);
+        startHttpServerAsync();
 
-        log("Agent ready. Dashboard: http://127.0.0.1:" + CONFIG.httpPort);
+        log("Agent ready. Dashboard starting at http://127.0.0.1:" + CONFIG.httpPort);
+    }
+
+    private static void startHttpServerAsync() {
+        Thread thread = new Thread(new Runnable() {
+            @Override public void run() {
+                startHttpServer();
+            }
+        }, "apmlite-http-bootstrap");
+        thread.setDaemon(true);
+        thread.start();
     }
 
     private static void initDatabase() {
@@ -293,27 +315,131 @@ public class APMLiteAgent {
     private static void installHttpInstrumentation(Instrumentation inst) {
         new AgentBuilder.Default()
                 .ignore(ElementMatchers.nameStartsWith("net.bytebuddy."))
-                .type(ElementMatchers.hasSuperType(ElementMatchers.named("javax.servlet.http.HttpServlet"))
-                        .or(ElementMatchers.hasSuperType(ElementMatchers.named("jakarta.servlet.http.HttpServlet"))))
+                .type(ElementMatchers.named("javax.servlet.http.HttpServlet")
+                        .or(ElementMatchers.named("jakarta.servlet.http.HttpServlet")))
                 .transform((builder, typeDescription, classLoader, module, protectionDomain) ->
                         builder.method(ElementMatchers.named("service"))
                                 .intercept(Advice.to(HttpServiceAdvice.class)))
                 .installOn(inst);
     }
 
+    private static void installSpringMvcInstrumentation(Instrumentation inst) {
+        new AgentBuilder.Default()
+                .ignore(ElementMatchers.nameStartsWith("net.bytebuddy."))
+                .type(ElementMatchers.named("org.springframework.web.servlet.FrameworkServlet"))
+                .transform((builder, typeDescription, classLoader, module, protectionDomain) ->
+                        builder.method(ElementMatchers.named("service")
+                                .and(ElementMatchers.takesArguments(2)))
+                                .intercept(Advice.to(HttpServiceAdvice.class)))
+                .installOn(inst);
+    }
+
+    private static void installWebFluxInstrumentation(Instrumentation inst) {
+        new AgentBuilder.Default()
+                .ignore(ElementMatchers.nameStartsWith("net.bytebuddy."))
+                .type(ElementMatchers.named("org.springframework.web.reactive.DispatcherHandler"))
+                .transform((builder, typeDescription, classLoader, module, protectionDomain) ->
+                        builder.method(ElementMatchers.named("handle")
+                                .and(ElementMatchers.takesArguments(1)))
+                                .intercept(Advice.to(WebFluxHandleAdvice.class)))
+                .installOn(inst);
+    }
+
     public static class HttpServiceAdvice {
-        @Advice.OnMethodEnter
-        public static long onEnter(@Advice.Argument(0) Object request) {
-            APMLiteAgent.recordHttpEnter(request);
+        @Advice.OnMethodEnter(suppress = Throwable.class)
+        public static Object onEnter(@Advice.Argument(0) Object request) {
+            return beginHttpRequest(request);
+        }
+
+        @Advice.OnMethodExit(onThrowable = Throwable.class, suppress = Throwable.class)
+        public static void onExit(@Advice.Enter Object invocation,
+                                  @Advice.Argument(1) Object response,
+                                  @Advice.Thrown Throwable thrown) {
+            endHttpRequest(invocation, response, thrown);
+        }
+    }
+
+    public static Object beginHttpRequest(Object request) {
+        HttpRequestContext context = HTTP_CONTEXT.get();
+        if (context == null) {
+            context = new HttpRequestContext(request, System.nanoTime());
+            HTTP_CONTEXT.set(context);
+            recordHttpEnter(request);
+        }
+        context.depth++;
+        return context;
+    }
+
+    public static void endHttpRequest(Object invocation, Object response, Throwable thrown) {
+        if (!(invocation instanceof HttpRequestContext)) return;
+        HttpRequestContext context = (HttpRequestContext) invocation;
+        if (--context.depth <= 0) {
+            HTTP_CONTEXT.remove();
+            recordHttpExit(context.request, response, System.nanoTime() - context.startedAt, thrown);
+        }
+    }
+
+    private static final class HttpRequestContext {
+        private final Object request;
+        private final long startedAt;
+        private int depth;
+
+        private HttpRequestContext(Object request, long startedAt) {
+            this.request = request;
+            this.startedAt = startedAt;
+        }
+    }
+
+    public static class WebFluxHandleAdvice {
+        @Advice.OnMethodEnter(suppress = Throwable.class)
+        public static long onEnter(@Advice.Argument(0) Object exchange) {
+            APMLiteAgent.recordHttpEnter(exchange);
             return System.nanoTime();
         }
 
-        @Advice.OnMethodExit(onThrowable = Throwable.class)
+        @Advice.OnMethodExit(onThrowable = Throwable.class, suppress = Throwable.class)
         public static void onExit(@Advice.Enter long startedAt,
-                                  @Advice.Argument(0) Object request,
-                                  @Advice.Argument(1) Object response,
+                                  @Advice.Argument(0) Object exchange,
+                                  @Advice.Return(readOnly = false, typing = Assigner.Typing.DYNAMIC) Object result,
                                   @Advice.Thrown Throwable thrown) {
-            APMLiteAgent.recordHttpExit(request, response, System.nanoTime() - startedAt, thrown);
+            if (thrown != null || result == null) {
+                APMLiteAgent.recordHttpExit(exchange, webFluxResponse(exchange), System.nanoTime() - startedAt, thrown);
+                return;
+            }
+            try {
+                result = wrapReactiveResult(result, exchange, startedAt);
+            } catch (Throwable ignored) {
+                APMLiteAgent.recordHttpExit(exchange, webFluxResponse(exchange), System.nanoTime() - startedAt, null);
+            }
+        }
+    }
+
+    public static Object wrapReactiveResult(final Object publisher, final Object exchange, final long startedAt) throws Exception {
+        ClassLoader loader = publisher.getClass().getClassLoader();
+        Class<?> publisherType = Class.forName("org.reactivestreams.Publisher", false, loader);
+        Class<?> monoType = Class.forName("reactor.core.publisher.Mono", false, loader);
+        Object mono = monoType.getMethod("from", publisherType).invoke(null, publisher);
+        final java.util.concurrent.atomic.AtomicReference<Throwable> error = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        Object withError = monoType.getMethod("doOnError", java.util.function.Consumer.class)
+                .invoke(mono, new java.util.function.Consumer<Object>() {
+                    @Override public void accept(Object value) {
+                        if (value instanceof Throwable) error.set((Throwable) value);
+                    }
+                });
+        return monoType.getMethod("doFinally", java.util.function.Consumer.class)
+                .invoke(withError, new java.util.function.Consumer<Object>() {
+                    @Override public void accept(Object signal) {
+                        APMLiteAgent.recordHttpExit(exchange, webFluxResponse(exchange), System.nanoTime() - startedAt, error.get());
+                    }
+                });
+    }
+
+    public static Object webFluxResponse(Object exchange) {
+        if (exchange == null) return null;
+        try {
+            return exchange.getClass().getMethod("getResponse").invoke(exchange);
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 
@@ -421,42 +547,45 @@ public class APMLiteAgent {
                 + "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
                 + "<title>APMLite Agent Dashboard</title>"
                 + "<style>"
-                + ":root{--bg:#0b1220;--panel:#101a2f;--panel2:#16233d;--text:#edf4ff;--muted:#9ab0d3;--accent:#67e8f9;--warn:#fcd34d;--bad:#fda4af;}"
-                + "*{box-sizing:border-box}body{margin:0;font-family:'Segoe UI',sans-serif;background:radial-gradient(circle at top,#183055 0,#0b1220 55%);color:var(--text)}"
-                + ".wrap{max-width:1280px;margin:0 auto;padding:24px}.hero{display:flex;justify-content:space-between;align-items:end;gap:16px;margin-bottom:20px}"
-                + "h1{margin:0;font-size:34px}p{margin:6px 0 0;color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}"
-                + ".card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid rgba(154,176,211,.16);border-radius:18px;padding:18px;box-shadow:0 18px 40px rgba(0,0,0,.24)}"
-                + ".label{font-size:12px;letter-spacing:.08em;color:var(--muted);text-transform:uppercase}.value{font-size:28px;font-weight:700;margin-top:10px}"
+                + ":root{color-scheme:light;--bg:#f4f7fb;--panel:#fff;--panel2:#f8fafc;--text:#17243a;--muted:#68778d;--accent:#2563eb;--warn:#a16207;--bad:#be123c;--line:#e2e8f0;}"
+                + "*{box-sizing:border-box}body{margin:0;font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.5}"
+                + ".wrap{max-width:1440px;margin:0 auto;padding:28px 32px 56px}.hero{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px}"
+                + "h1{margin:0;font-size:28px;letter-spacing:-.03em}p{margin:4px 0 0;color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}"
+                + ".card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;box-shadow:0 2px 8px rgba(15,23,42,.04);min-width:0}"
+                + ".label{font-size:12px;letter-spacing:.04em;color:var(--muted);font-weight:650}.value{font-size:30px;line-height:1.2;font-weight:700;margin-top:8px;letter-spacing:-.03em}"
                 + ".split{display:grid;grid-template-columns:2fr 1.2fr;gap:14px;margin-top:14px}.table{width:100%;border-collapse:collapse;margin-top:10px}"
-                + ".table th,.table td{text-align:left;padding:10px 8px;border-bottom:1px solid rgba(154,176,211,.12);font-size:14px;vertical-align:top}"
+                + ".table th,.table td{text-align:left;padding:11px 10px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top}.table th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}.table td{overflow-wrap:anywhere}.table tr:last-child td{border-bottom:0}"
                 + ".pill{display:inline-block;padding:4px 8px;border-radius:999px;font-size:12px;font-weight:700}.pill.slow{background:rgba(245,158,11,.14);color:var(--warn)}.pill.error{background:rgba(251,113,133,.14);color:var(--bad)}"
-                + ".pill.ok{background:rgba(52,211,153,.14);color:#6ee7b7}.metric-list{display:flex;gap:18px;flex-wrap:wrap;margin-top:12px}.metric-list strong{display:block;font-size:22px}.sql-points{display:flex;gap:5px;align-items:flex-end;min-height:90px;overflow:auto;margin-top:12px}.sql-point{width:10px;height:10px;border-radius:50%;flex:0 0 auto}.sql-point.green{background:#4ade80}.sql-point.yellow{background:#facc15}.sql-point.red{background:#f87171}.sql-point.error{background:#c084fc}.trend-points{display:flex;gap:8px;align-items:flex-end;min-height:135px;overflow:auto;margin-top:12px}.trend-item{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:125px;min-width:30px;font-size:10px;color:var(--muted)}.trend-item i{display:block;width:22px;min-height:4px;border-radius:5px 5px 2px 2px;background:linear-gradient(180deg,var(--accent),#2563eb)}.trend-item b{font-size:10px;color:var(--text);margin-bottom:3px;font-weight:600}"
-                + ".muted{color:var(--muted)}#timeline{display:flex;align-items:flex-end;gap:6px;height:180px;margin-top:14px}.bar{flex:1;min-width:6px;border-radius:8px 8px 2px 2px;background:linear-gradient(180deg,var(--accent),#2563eb)}"
-                + ".section-title{font-size:18px;margin:24px 0 8px;color:var(--text);letter-spacing:.02em}.nav{display:flex;gap:8px;flex-wrap:wrap}.nav a{color:var(--text);text-decoration:none;background:rgba(103,232,249,.1);border:1px solid rgba(103,232,249,.25);padding:7px 12px;border-radius:999px;font-size:13px}.nav a:hover{background:rgba(103,232,249,.25)}"
-                + "@media (max-width:920px){.split{grid-template-columns:1fr}.hero{align-items:start;flex-direction:column}}"
+                + ".pill.ok{background:#dcfce7;color:#166534}.metric-list{display:flex;gap:18px;flex-wrap:wrap;margin-top:12px}.metric-list strong{display:block;font-size:22px}.sql-heatmap{display:grid;grid-template-columns:48px minmax(0,1fr);gap:8px;margin-top:16px}.sql-yaxis{display:flex;flex-direction:column;justify-content:space-between;height:210px;padding:0 0 18px;text-align:right;color:var(--muted);font-size:10px}.sql-plot-wrap{min-width:0}.sql-points{height:210px;position:relative;overflow:hidden;border-left:1px solid #cbd5e1;border-bottom:1px solid #cbd5e1;background:repeating-linear-gradient(to top,transparent 0,transparent calc(25% - 1px),#e8edf4 calc(25% - 1px),#e8edf4 25%),repeating-linear-gradient(to right,transparent 0,transparent calc(10% - 1px),#eef2f7 calc(10% - 1px),#eef2f7 10%)}.sql-point{position:absolute;width:11px;height:11px;border:2px solid white;border-radius:50%;transform:translate(-50%,50%);cursor:pointer;box-shadow:0 1px 4px #33415555;transition:left 2.2s linear,bottom .35s ease,transform .12s,box-shadow .12s}.sql-point:hover,.sql-point:focus,.sql-point.selected{z-index:2;transform:translate(-50%,50%) scale(1.55);box-shadow:0 0 0 3px #2563eb33;outline:0}.sql-point.green{background:#16a34a}.sql-point.yellow{background:#eab308}.sql-point.red{background:#dc2626}.sql-point.error{background:#9333ea}.sql-xaxis{display:flex;justify-content:space-between;color:var(--muted);font-size:10px;padding-top:5px}.sql-pick{margin-top:12px;padding:10px 12px;background:#f8fafc;border:1px solid var(--line);border-radius:8px;font-size:12px}.sql-pick strong{color:var(--accent);margin-right:10px}.sql-pick-code{display:block;margin-top:4px;color:var(--text);overflow-wrap:anywhere}.trend-points{display:flex;gap:8px;align-items:flex-end;min-height:135px;overflow:auto;margin-top:12px}.trend-item{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:125px;min-width:30px;font-size:10px;color:var(--muted)}.trend-item i{display:block;width:22px;min-height:4px;border-radius:5px 5px 2px 2px;background:linear-gradient(180deg,var(--accent),#2563eb)}.trend-item b{font-size:10px;color:var(--text);margin-bottom:3px;font-weight:600}"
+                + ".muted{color:var(--muted)}#timeline{display:flex;align-items:flex-end;gap:6px;height:180px;margin-top:14px}.bar{flex:1;min-width:6px;border-radius:5px 5px 2px 2px;background:linear-gradient(180deg,#60a5fa,#2563eb)}"
+                + ".section-title{font-size:17px;font-weight:700;margin:28px 0 10px;color:var(--text)}.nav{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.nav a{color:#334155;text-decoration:none;background:#f1f5f9;border:1px solid var(--line);padding:7px 11px;border-radius:7px;font-size:12px;font-weight:600}.nav a:hover{background:#e2e8f0}.metric-list{gap:30px}.metric-list strong{font-size:24px;margin-top:3px}.trend-item i{background:linear-gradient(180deg,#60a5fa,#2563eb)}input{font:inherit;max-width:220px}"
+                + ".traffic-kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin:0 0 24px}.traffic-kpi{border-top:4px solid var(--accent);min-height:128px;padding:20px 22px}.traffic-kpi:nth-child(2){border-top-color:#0f766e}.traffic-kpi:nth-child(3){border-top-color:#7c3aed}.traffic-kpi:nth-child(4){border-top-color:#dc2626}.traffic-kpi:nth-child(5){border-top-color:#d97706}.traffic-kpi .label{font-size:13px}.traffic-kpi strong{display:block;font-size:40px;line-height:1.15;margin-top:12px;letter-spacing:-.04em;font-variant-numeric:tabular-nums}.traffic-kpi .unit{font-size:14px;font-weight:600;color:var(--muted);margin-left:5px}"
+                + ".traffic-flow{margin:-8px 0 24px;padding:18px 22px}.flow-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.flow-head strong{font-size:15px}.flow-head .muted{margin-left:10px}.combo-badge,.load-badge{padding:5px 9px;border-radius:999px;background:#eff6ff;color:#1d4ed8;font-size:11px;font-weight:800;letter-spacing:.04em}.load-badge{background:#dcfce7;color:#166534}.load-badge.medium{background:#fef3c7;color:#92400e}.load-badge.high{background:#fee2e2;color:#b91c1c;animation:hot-glow .8s ease-in-out infinite alternate}.combo-badge.combo-hit{background:#dbeafe;color:#1e40af}.traffic-kpi#tpsKpi{position:relative;isolation:isolate;overflow:hidden;background:linear-gradient(130deg,#fff,#eff6ff);transition:box-shadow .3s,background .3s}.traffic-kpi#tpsKpi:before{content:'';position:absolute;z-index:0;inset:-45%;background:radial-gradient(ellipse at center,var(--tps-glow,rgba(59,130,246,.35)),transparent 62%);filter:blur(15px);opacity:.7;animation:tps-ambient 3s ease-in-out infinite alternate;pointer-events:none}.traffic-kpi#tpsKpi .label,.traffic-kpi#tpsKpi strong{position:relative;z-index:1}.traffic-kpi#tpsKpi.tps-medium{--tps-glow:rgba(245,158,11,.42);box-shadow:0 8px 28px rgba(245,158,11,.16)}.traffic-kpi#tpsKpi.tps-high{--tps-glow:rgba(239,68,68,.52);box-shadow:0 8px 30px rgba(239,68,68,.22)}@keyframes tps-ambient{from{transform:translate(-18%,-4%) scale(.92);opacity:.48}to{transform:translate(18%,4%) scale(1.08);opacity:.9}}.flow-track:after{content:'';position:absolute;z-index:1;top:0;bottom:0;left:-45%;width:45%;background:linear-gradient(90deg,transparent,rgba(22,163,74,.06),rgba(255,255,255,.92),rgba(22,163,74,.06),transparent);filter:blur(1px);animation:lane-flow-in var(--flow-in-speed,var(--flow-speed,2.8s)) linear infinite;pointer-events:none}.flow-lane.out .flow-track:after{left:auto;right:-45%;animation-name:lane-flow-out;animation-duration:var(--flow-out-speed,var(--flow-speed,2.8s));background:linear-gradient(90deg,transparent,rgba(15,118,110,.05),rgba(255,255,255,.92),rgba(15,118,110,.05),transparent)}.flow-stage.level-medium .flow-track:after{background:linear-gradient(90deg,transparent,rgba(217,119,6,.08),#fff,rgba(217,119,6,.08),transparent)}.flow-stage.level-high .flow-track:after{background:linear-gradient(90deg,transparent,rgba(220,38,38,.12),#fff,rgba(220,38,38,.12),transparent)}@keyframes lane-flow-in{to{left:100%}}@keyframes lane-flow-out{to{right:100%}}.flow-stage{display:grid;grid-template-columns:112px minmax(80px,1fr) 112px;align-items:center;gap:14px;margin-top:14px}.flow-node{border:1px solid #cbd5e1;border-radius:9px;text-align:center;padding:12px 8px;background:#f8fafc;font-weight:700;transition:background .25s,color .25s,box-shadow .25s}.flow-node.was{color:white;background:#16a34a;border-color:#16a34a;box-shadow:0 4px 12px #16a34a33}.flow-lanes{display:grid;gap:8px}.flow-lane{display:grid;grid-template-columns:42px minmax(0,1fr) 72px;align-items:center;gap:8px;font-size:11px;font-weight:700}.flow-track{height:22px;background:#dcfce7;border-radius:999px;position:relative;overflow:hidden;transition:background .25s}.flow-lane.out .flow-track{background:#ccfbf1}.packet{position:absolute;left:-8px;top:7px;width:8px;height:8px;border-radius:50%;background:#16a34a;box-shadow:0 0 9px #4ade80;animation:packet-in var(--flow-in-speed,var(--flow-speed,2.8s)) linear infinite;transition:background .25s,box-shadow .25s}.flow-lane.out .packet{background:#0f766e;box-shadow:0 0 9px #5eead4;animation-name:packet-out;animation-duration:var(--flow-out-speed,var(--flow-speed,2.8s))}.flow-stage.level-medium .flow-node.was{background:#d97706;border-color:#d97706;box-shadow:0 0 18px #f59e0b66}.flow-stage.level-medium .flow-track{background:#fef3c7}.flow-stage.level-medium .packet{background:#d97706;box-shadow:0 0 12px #fbbf24}.flow-stage.level-high .flow-node.was{background:#dc2626;border-color:#b91c1c;box-shadow:0 0 24px #ef444488;animation:hot-glow .55s ease-in-out infinite alternate}.flow-stage.level-high .flow-track,.flow-stage.level-high .flow-lane.out .flow-track{background:#fee2e2}.flow-stage.level-high .packet,.flow-stage.level-high .flow-lane.out .packet{width:10px;height:10px;top:6px;background:#dc2626;box-shadow:0 0 16px #ef4444;animation-duration:var(--flow-in-speed,var(--flow-speed,2.8s))}@keyframes hot-glow{from{filter:saturate(1);box-shadow:0 0 8px #ef444455}to{filter:saturate(1.6);box-shadow:0 0 22px #ef444499}}.packet:nth-child(2){animation-delay:-.35s}.packet:nth-child(3){animation-delay:-.7s}.packet:nth-child(4){animation-delay:-1.05s}.packet:nth-child(5){animation-delay:-1.4s}.packet:nth-child(6){animation-delay:-1.75s}@keyframes packet-in{from{left:-8px;opacity:0}12%{opacity:1}to{left:calc(100% + 8px);opacity:.2}}@keyframes packet-out{from{left:calc(100% + 8px);opacity:0}12%{opacity:1}to{left:-8px;opacity:.2}}.flow-stage.idle .packet,.flow-stage.level-idle .packet{animation-play-state:running;opacity:.32}.traffic-kpi.punch{animation:combo-punch .7s cubic-bezier(.2,.8,.25,1);box-shadow:0 8px 24px rgba(37,99,235,.24)}@keyframes combo-punch{0%,100%{transform:scale(1)}12%{transform:scale(var(--punch-scale,1.08))}25%{transform:scale(.99)}42%{transform:scale(1.05)}55%{transform:scale(.995)}70%{transform:scale(1.025)}85%{transform:scale(1)}}@media(max-width:560px){.traffic-flow{padding:14px}.flow-stage{grid-template-columns:72px minmax(80px,1fr) 72px;gap:7px}.flow-node{font-size:11px;padding:10px 4px}.flow-lane{grid-template-columns:28px minmax(0,1fr) 56px;gap:5px}.flow-head .muted{display:block;margin-left:0}}@media(prefers-reduced-motion:reduce){.flow-stage.level-high .flow-node.was,.traffic-kpi.punch,.load-badge.high{animation:none!important;transition:none!important}.traffic-kpi#tpsKpi:before{animation-duration:4s!important}}"
+                + ".split{grid-template-columns:1fr 1fr}.table{display:table}"
+                + "@media (max-width:920px){.split{grid-template-columns:1fr}.hero{align-items:start;flex-direction:column}.wrap{padding:20px}.table{display:block;overflow-x:auto;white-space:nowrap}.traffic-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}@media (max-width:560px){.wrap{padding:14px 12px 36px}h1{font-size:24px}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.card{padding:14px}.value{font-size:24px}.metric-list{gap:18px}.nav a{padding:6px 8px}.traffic-kpis{gap:8px}.traffic-kpi{min-height:106px;padding:14px}.traffic-kpi strong{font-size:30px}}"
+                + ":root{color-scheme:light;--bg:#eef4f1;--panel:#fff;--panel2:#f7faf8;--text:#18343b;--muted:#657b7c;--accent:#087e8b;--warn:#a66a16;--bad:#bd4540;--line:#dbe6e0}.wrap{max-width:1480px;padding:30px 34px 60px}body{background:radial-gradient(circle at 8% 0%,#e3f1eb 0,transparent 28%),var(--bg);color:var(--text)}.hero{padding:8px 2px 20px;border-bottom:1px solid #d4e2dc;margin-bottom:20px}.hero>div:first-child{display:flex;align-items:center;gap:14px}.hero>div:first-child:before{content:'A';display:grid;place-items:center;width:44px;height:44px;flex:none;border-radius:14px;background:linear-gradient(145deg,#087e8b,#155e63);color:#fff;font-size:21px;font-weight:850;box-shadow:0 7px 16px rgba(8,126,139,.2)}.hero h1{font-size:27px;letter-spacing:-.04em}.hero p{font-size:13px}.hero>.muted{padding:9px 13px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.72);font-size:12px}.card{border-color:var(--line);border-radius:15px;box-shadow:0 7px 24px rgba(24,52,59,.045)}.nav{gap:7px}.nav a{background:#f5f9f7;border-color:#dce8e2;color:#315158;border-radius:999px;padding:8px 13px;transition:background .2s,border-color .2s,color .2s}.nav a:hover{background:#e2f2ed;border-color:#a9d5c7;color:#075d64}.section-title{display:flex;align-items:center;gap:10px;font-size:16px;font-weight:750;letter-spacing:-.01em;margin:27px 0 11px}.section-title:before{content:'';width:8px;height:18px;border-radius:4px;background:linear-gradient(180deg,#10a3a0,#087e8b)}.traffic-kpi{border:1px solid var(--line)!important;border-left:4px solid var(--accent)!important;border-radius:14px;min-height:128px;padding:18px 20px;box-shadow:0 5px 18px rgba(24,52,59,.035)}.traffic-kpi:nth-child(2){border-left-color:#238b83!important}.traffic-kpi:nth-child(3){border-left-color:#547ca5!important}.traffic-kpi:nth-child(4){border-left-color:#bd4540!important}.traffic-kpi:nth-child(5){border-left-color:#a66a16!important}.traffic-kpi .label{font-size:12px;font-weight:700;letter-spacing:.01em}.traffic-kpi strong{font-size:38px;margin-top:10px}.traffic-kpi#tpsKpi{background:linear-gradient(140deg,#fff 12%,#f0faf7 100%)}.traffic-kpi#tpsKpi.tps-low{--tps-glow:rgba(8,126,139,.28)}.traffic-kpi#tpsKpi.tps-idle{--tps-glow:rgba(8,126,139,.18)}.traffic-flow{margin:-8px 0 24px;padding:20px 22px;border-left:4px solid #168f88;background:linear-gradient(115deg,#fff 0%,#f8fcfa 100%)}.flow-head strong{font-size:14px;letter-spacing:.01em}.flow-head .muted{font-size:11px}.flow-node{border-radius:12px;background:#f2f7f5;border-color:#d9e7e0;color:#315158;letter-spacing:.08em;font-size:11px}.flow-node.was{background:#087e8b;border-color:#087e8b;box-shadow:0 5px 18px rgba(8,126,139,.2)}.flow-track{height:24px;border:1px solid rgba(25,110,91,.07);background:#e6f4ed}.flow-lane.out .flow-track{background:#e4f4f2}.flow-stage.level-medium .flow-track{background:#fbf1d9}.flow-stage.level-high .flow-track,.flow-stage.level-high .flow-lane.out .flow-track{background:#fae7e4}.flow-stage.level-medium .flow-node.was{background:#bc7c20;border-color:#bc7c20;box-shadow:0 5px 18px rgba(188,124,32,.2)}.flow-stage.level-high .flow-node.was{background:#bd4540;border-color:#bd4540;box-shadow:0 5px 20px rgba(189,69,64,.24)}.flow-stage.level-medium .packet{background:#a66a16}.flow-stage.level-high .packet,.flow-stage.level-high .flow-lane.out .packet{background:#bd4540;box-shadow:0 0 14px rgba(189,69,64,.65)}.combo-badge{background:#eaf3f1;color:#315b5b}.combo-badge.combo-hit{background:#dff3ec;color:#087e66}.load-badge{background:#e7f4ee;color:#247354}.load-badge.medium{background:#fbf0d9;color:#8a5b11}.load-badge.high{background:#fae4e1;color:#a93632}.table th{background:#f7faf8;border-bottom-color:#dbe6e0}.table td{color:#304c50}.sql-points{border-color:#c9d9d2;background:repeating-linear-gradient(to top,transparent 0,transparent calc(25% - 1px),#dfe9e4 calc(25% - 1px),#dfe9e4 25%),repeating-linear-gradient(to right,transparent 0,transparent calc(10% - 1px),#e6eeea calc(10% - 1px),#e6eeea 10%)}.sql-point{box-shadow:0 2px 7px rgba(32,68,58,.22)}.sql-point:hover,.sql-point:focus,.sql-point.selected{box-shadow:0 0 0 3px rgba(8,126,139,.18),0 2px 7px rgba(32,68,58,.2)}.sql-pick{background:#f4f9f6;border-color:#dbe6e0;border-radius:10px}.sql-pick strong{color:#087e8b}#timeline .bar{background:linear-gradient(180deg,#54b8a1,#168f88)}.trend-item i{background:linear-gradient(180deg,#54b8a1,#168f88)}input:focus{outline:2px solid rgba(8,126,139,.28);border-color:#168f88!important}a:focus-visible,button:focus-visible{outline:3px solid rgba(8,126,139,.35);outline-offset:2px}.flow-stage.level-high .flow-lane.out .packet{animation-duration:var(--flow-out-speed,var(--flow-speed,2.8s))}@media(max-width:920px){.wrap{padding:22px 20px 44px}}@media(max-width:560px){.wrap{padding:18px 12px 36px}.hero{align-items:flex-start}.hero>.muted{font-size:11px}.hero>div:first-child:before{width:38px;height:38px}.traffic-kpi strong{font-size:29px}}"
                 + "</style></head><body><div class=\"wrap\">"
-                + "<div class=\"hero\"><div><h1>APMLite Agent</h1><p>Lightweight JVM APM dashboard</p></div><div class=\"muted\">Service <span id=\"service\">-</span></div></div>"
-                + "<div class=\"card\" style=\"margin-bottom:14px;display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap\"><div class=\"nav\"><strong>Operations view</strong><a href=\"#overview\">Overview</a><a href=\"#wasTraffic\">WAS</a><a href=\"#sqlPanel\">SQL</a><a href=\"#errorPanel\">Errors</a><a href=\"#collectorPanel\">Collector</a></div><span class=\"muted\">Auto refresh 2s</span></div><div id=\"overview\" class=\"section-title\">Service Overview</div>"
+                + "<div class=\"hero\"><div><h1>APMLite 모니터링</h1><p>JVM · WAS · SQL 실시간 상태</p></div><div class=\"muted\">서비스 <strong id=\"service\">-</strong>　<span id=\"healthBadge\" class=\"pill\">확인 중</span></div></div>"
+                + "<div class=\"card\" style=\"margin-bottom:16px;display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap\"><div class=\"nav\"><a href=\"#wasTraffic\">WAS 트래픽</a><a href=\"#overview\">JVM 개요</a><a href=\"#sqlPanel\">SQL 분석</a><a href=\"#errorPanel\">오류</a><a href=\"#collectorPanel\">수집기</a></div><span class=\"muted\">2초마다 갱신</span></div><div class=\"section-title\">WAS 실시간 지표</div><div id=\"wasTraffic\" class=\"traffic-kpis\"><div class=\"card traffic-kpi\" id=\"tpsKpi\"><div class=\"label\">TPS</div><strong><span id=\"trafficTps\">-</span><span class=\"unit\">req/s</span></strong></div><div class=\"card traffic-kpi\"><div class=\"label\">현재 처리 중인 요청</div><strong><span id=\"trafficActive\">-</span><span class=\"unit\">건</span></strong></div><div class=\"card traffic-kpi\"><div class=\"label\">누적 요청</div><strong><span id=\"trafficHits\">-</span><span class=\"unit\">건</span></strong></div><div class=\"card traffic-kpi\"><div class=\"label\">오류율</div><strong><span id=\"trafficErrorRate\">-</span></strong></div><div class=\"card traffic-kpi\"><div class=\"label\">힙 사용률</div><strong><span id=\"heapPct\">-</span></strong><div class=\"muted\" id=\"heapDetail\">-</div></div></div><div class=\"traffic-flow card\"><div class=\"flow-head\"><div><strong>실시간 트래픽 흐름</strong><span class=\"muted\">요청 유입 · 응답 처리 · 참고 기준: 100 TPS 주의 / 300 TPS 위험</span></div><span id=\"trafficLoad\" class=\"load-badge\">IDLE</span><span id=\"trafficCombo\" class=\"combo-badge\">대기 중</span></div><div id=\"flowStage\" class=\"flow-stage idle\"><div class=\"flow-node\">CLIENTS</div><div class=\"flow-lanes\"><div class=\"flow-lane in\"><span>IN</span><div class=\"flow-track\"><i class=\"packet\"></i><i class=\"packet\"></i><i class=\"packet\"></i><i class=\"packet\"></i><i class=\"packet\"></i><i class=\"packet\"></i></div><strong id=\"flowInRate\">0/s</strong></div><div class=\"flow-lane out\"><span>OUT</span><div class=\"flow-track\"><i class=\"packet\"></i><i class=\"packet\"></i><i class=\"packet\"></i><i class=\"packet\"></i><i class=\"packet\"></i><i class=\"packet\"></i></div><strong id=\"flowOutRate\">0/s</strong></div></div><div class=\"flow-node was\">WAS</div></div></div><div id=\"overview\" class=\"section-title\">JVM 상태 및 메모리</div>"
                 + "<div class=\"grid\">"
-                + "<div class=\"card\"><div class=\"label\">Heap Usage</div><div class=\"value\" id=\"heapPct\">-</div><div class=\"muted\" id=\"heapDetail\">-</div></div>"
-                + "<div class=\"card\"><div class=\"label\">QPS</div><div class=\"value\" id=\"qps\">-</div><div class=\"muted\">Queries per second from the latest sample</div></div>"
-                + "<div class=\"card\"><div class=\"label\">Threads</div><div class=\"value\" id=\"threads\">-</div><div class=\"muted\" id=\"daemonThreads\">-</div></div>"
+                + "<div class=\"card\"><div class=\"label\">QPS</div><div class=\"value\" id=\"qps\">-</div><div class=\"muted\">최근 표본 기준 초당 SQL 실행 건수</div></div>"
+                + "<div class=\"card\"><div class=\"label\">스레드</div><div class=\"value\" id=\"threads\">-</div><div class=\"muted\" id=\"daemonThreads\">-</div></div>"
                 + "<div class=\"card\"><div class=\"label\">CPU</div><div class=\"value\" id=\"cpu\">-</div><div class=\"muted\" id=\"sysCpu\">-</div></div>"
-                + "<div class=\"card\"><div class=\"label\">Slow Queries</div><div class=\"value\" id=\"slowCount\">-</div><div class=\"muted\">Total captured slow or error queries</div></div>"
+                + "<div class=\"card\"><div class=\"label\">느린 SQL</div><div class=\"value\" id=\"slowCount\">-</div><div class=\"muted\">수집한 느린 SQL 및 오류 SQL</div></div>"
                 + "<div class=\"card\"><div class=\"label\">GC</div><div class=\"value\" id=\"gcCount\">-</div><div class=\"muted\" id=\"gcTime\">-</div></div>"
-                + "<div class=\"card\"><div class=\"label\">Agent Health</div><div class=\"value\" id=\"healthState\">-</div><div class=\"muted\" id=\"healthAge\">-</div></div>"
+                + "<div class=\"card\"><div class=\"label\">에이전트 상태</div><div class=\"value\" id=\"healthState\">-</div><div class=\"muted\" id=\"healthAge\">-</div></div>"
                 + "</div>"
-                + "<div class=\"section-title\">WAS Performance</div><div id=\"wasTraffic\" class=\"card\" style=\"margin-top:14px\"><div class=\"label\">WAS Traffic</div><input id=\"uriFilter\" placeholder=\"Filter URI\" style=\"float:right;background:var(--panel2);border:1px solid rgba(154,176,211,.3);color:var(--text);padding:6px 9px;border-radius:8px\"><div class=\"metric-list\"><div><span class=\"muted\">TPS</span><strong id=\"trafficTps\">-</strong></div><div><span class=\"muted\">Active</span><strong id=\"trafficActive\">-</strong></div><div><span class=\"muted\">Errors</span><strong id=\"trafficErrorRate\">-</strong></div><div><span class=\"muted\">Users</span><strong id=\"trafficUsers\">Unknown</strong></div><div><span class=\"muted\">Alerts</span><strong id=\"alertState\">-</strong></div></div><table class=\"table\"><thead><tr><th>URI</th><th>Hits</th><th>Avg</th><th>P95</th><th>Max</th><th>Errors</th></tr></thead><tbody id=\"trafficRows\"></tbody></table></div>"
-                + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">WAS Trend</div><div class=\"muted\">Recent TPS and active request samples · numeric labels are TPS</div><div id=\"trafficTrend\" class=\"trend-points\"></div></div>"
-                + "<div class=\"section-title\">Alert Center</div><div id=\"alertsPanel\" class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Active Alerts</div><table class=\"table\"><thead><tr><th>Type</th><th>Scope</th><th>Value</th><th>Threshold</th></tr></thead><tbody id=\"alertRows\"></tbody></table></div>"
+                + "<div class=\"section-title\">URI별 요청 상세</div><div id=\"trafficTablePanel\" class=\"card\" style=\"margin-top:14px\"><div class=\"label\">HTTP 요청 상세</div><input id=\"uriFilter\" placeholder=\"URI 검색\" style=\"float:right;background:var(--panel2);border:1px solid rgba(154,176,211,.3);color:var(--text);padding:6px 9px;border-radius:8px\"><table class=\"table\"><thead><tr><th>URI</th><th>요청</th><th>평균</th><th>P95</th><th>최대</th><th>오류</th></tr></thead><tbody id=\"trafficRows\"></tbody></table></div>"
+                + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">WAS 트래픽 추이</div><div class=\"muted\">최근 TPS와 동시 처리 추이 · 숫자는 TPS</div><div id=\"trafficTrend\" class=\"trend-points\"></div></div>"
+                + "<div class=\"section-title\">알림 센터</div><div id=\"alertsPanel\" class=\"card\" style=\"margin-top:14px\"><div class=\"label\">활성 알림</div><table class=\"table\"><thead><tr><th>유형</th><th>범위</th><th>현재값</th><th>기준</th></tr></thead><tbody id=\"alertRows\"></tbody></table></div>"
                 + "<div class=\"split\">"
-                + "<div class=\"card\"><div class=\"label\">Heap Timeline</div><div id=\"timeline\"></div></div>"
-                + "<div class=\"card\"><div class=\"label\">Top SQL</div><table class=\"table\"><thead><tr><th>SQL</th><th>Count</th><th>Avg</th><th>Max</th></tr></thead><tbody id=\"sqlTop\"></tbody></table></div>"
+                + "<div class=\"card\"><div class=\"label\">힙 사용 추이</div><div id=\"timeline\"></div></div>"
+                + "<div class=\"card\"><div class=\"label\">상위 SQL</div><table class=\"table\"><thead><tr><th>SQL</th><th>건수</th><th>평균</th><th>최대</th></tr></thead><tbody id=\"sqlTop\"></tbody></table></div>"
                 + "</div>"
-                + "<div class=\"section-title\">SQL and Error Analysis</div><div id=\"sqlPanel\" class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Recent Slow Queries</div><table class=\"table\"><thead><tr><th>Time</th><th>Status</th><th>Duration</th><th>SQL</th></tr></thead><tbody id=\"slowRows\"></tbody></table></div>"
-                + "<div id=\"errorPanel\" class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Recent Exceptions and HTTP Errors</div><table class=\"table\"><thead><tr><th>Time</th><th>URI</th><th>Status</th><th>Message</th></tr></thead><tbody id=\"errorRows\"></tbody></table></div>"
-                + "<div class=\"split\"><div class=\"card\"><div class=\"label\">SQL Execution Timeline</div><div class=\"muted\">Green &lt; 3s · Yellow 3–10s · Red ≥ 10s · Purple error</div><div id=\"sqlPoints\" class=\"sql-points\"></div></div><div id=\"collectorPanel\" class=\"card\"><div class=\"label\">Collector</div><div class=\"metric-list\"><div><span class=\"muted\">Queue</span><strong id=\"collectorQueue\">-</strong></div><div><span class=\"muted\">Dropped</span><strong id=\"collectorDropped\">-</strong></div><div><span class=\"muted\">Sent</span><strong id=\"collectorSent\">-</strong></div></div></div></div>"
-                + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Collector History</div><table class=\"table\"><thead><tr><th>Bucket</th><th>Service</th><th>Type</th><th>Count</th><th>Errors</th><th>Max</th></tr></thead><tbody id=\"collectorRows\"></tbody></table></div>"
+                + "<div class=\"section-title\">SQL · 오류 분석</div><div id=\"sqlPanel\" class=\"card\" style=\"margin-top:14px\"><div class=\"label\">최근 느린 SQL</div><table class=\"table\"><thead><tr><th>시각</th><th>상태</th><th>실행시간</th><th>SQL</th></tr></thead><tbody id=\"slowRows\"></tbody></table></div>"
+                + "<div id=\"errorPanel\" class=\"card\" style=\"margin-top:14px\"><div class=\"label\">최근 예외 · HTTP 오류</div><table class=\"table\"><thead><tr><th>시각</th><th>URI</th><th>상태</th><th>메시지</th></tr></thead><tbody id=\"errorRows\"></tbody></table></div>"
+                + "<div class=\"split\"><div class=\"card\"><div class=\"label\">SQL 실행 히트맵</div><div class=\"muted\">최근 5분을 2초마다 이동 표시합니다. 가로축은 시각, 세로축은 실행시간(ms)이며 점을 가리키거나 선택하면 SQL이 표시됩니다.</div><div class=\"sql-heatmap\"><div id=\"sqlYAxis\" class=\"sql-yaxis\"></div><div class=\"sql-plot-wrap\"><div id=\"sqlPoints\" class=\"sql-points\" role=\"img\" aria-label=\"SQL 실행 시간 히트맵\"></div><div id=\"sqlXAxis\" class=\"sql-xaxis\"></div></div></div><div id=\"sqlPick\" class=\"sql-pick\" aria-live=\"polite\">실행 점에 마우스를 올리거나 키보드로 선택하세요.</div></div><div id=\"collectorPanel\" class=\"card\"><div class=\"label\">수집기</div><div class=\"metric-list\"><div><span class=\"muted\">대기열</span><strong id=\"collectorQueue\">-</strong></div><div><span class=\"muted\">폐기</span><strong id=\"collectorDropped\">-</strong></div><div><span class=\"muted\">전송</span><strong id=\"collectorSent\">-</strong></div></div></div></div>"
+                + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">수집기 이력</div><table class=\"table\"><thead><tr><th>구간</th><th>서비스</th><th>유형</th><th>건수</th><th>오류</th><th>최대</th></tr></thead><tbody id=\"collectorRows\"></tbody></table></div>"
                 + "</div><script>"
                 + "async function load(){const [overview,timeline,top,slow,traffic,alerts,sqlTimeline,collector,errors,trafficTimeline,collectorSummary,health]=await Promise.all([fetch('/api/overview').then(r=>r.json()),fetch('/api/timeline').then(r=>r.json()),fetch('/api/sql/top').then(r=>r.json()),fetch('/api/sql/slow').then(r=>r.json()),fetch('/api/traffic').then(r=>r.json()),fetch('/api/alerts').then(r=>r.json()),fetch('/api/sql/timeline').then(r=>r.json()),fetch('/api/collector/status').then(r=>r.json()),fetch('/api/traffic/errors').then(r=>r.json()),fetch('/api/traffic/timeline').then(r=>r.json()),fetch('/api/collector/summary').then(r=>r.json()),fetch('/api/health').then(r=>r.json())]);"
                 + "document.getElementById('service').textContent=overview.serviceName;"
@@ -464,21 +593,21 @@ public class APMLiteAgent {
                 + "document.getElementById('heapDetail').textContent=overview.heapUsedMb.toFixed(1)+' MB / '+overview.heapMaxMb.toFixed(1)+' MB';"
                 + "document.getElementById('qps').textContent=overview.queriesPerSec;"
                 + "document.getElementById('threads').textContent=overview.threadCount;"
-                + "document.getElementById('daemonThreads').textContent='Daemon '+overview.daemonThreadCount;"
+                + "document.getElementById('daemonThreads').textContent='데몬 '+overview.daemonThreadCount;"
                 + "document.getElementById('cpu').textContent=(overview.processCpuLoad*100).toFixed(1)+'%';"
                 + "document.getElementById('sysCpu').textContent='System '+(overview.systemCpuLoad*100).toFixed(1)+'%';"
                 + "document.getElementById('slowCount').textContent=overview.slowQueryCount;"
-                + "document.getElementById('gcCount').textContent=overview.gcCount;document.getElementById('gcTime').textContent=overview.gcTimeMs+' ms total';document.getElementById('healthState').textContent=health.status;document.getElementById('healthState').className=health.status==='UP'?'pill ok':'pill error';document.getElementById('healthAge').textContent='Sample age '+health.sampleAgeMs+' ms';"
-                + "document.getElementById('trafficTps').textContent=traffic.tps;document.getElementById('trafficActive').textContent=traffic.activeRequests;document.getElementById('trafficErrorRate').textContent=traffic.errorRatePercent.toFixed(2)+'%';document.getElementById('trafficUsers').textContent=traffic.uniqueUsersStatus==='unknown'?'Unknown':traffic.uniqueUsers;document.getElementById('alertState').textContent=alerts.status;document.getElementById('alertState').className=alerts.status==='ALERT'?'pill error':'pill ok';"
+                + "document.getElementById('gcCount').textContent=overview.gcCount;document.getElementById('gcTime').textContent=overview.gcTimeMs+' ms total';document.getElementById('healthState').textContent=health.status;document.getElementById('healthState').className=health.status==='UP'?'pill ok':'pill error';document.getElementById('healthBadge').textContent=health.status;document.getElementById('healthBadge').className=health.status==='UP'?'pill ok':'pill error';document.getElementById('healthAge').textContent='Sample age '+health.sampleAgeMs+' ms';"
+                + "updateTrafficPulse(traffic.tps,traffic.responsesPerSecond,trafficTimeline.points,traffic.activeRequests);document.getElementById('trafficTps').textContent=traffic.tps;document.getElementById('trafficActive').textContent=traffic.activeRequests;document.getElementById('trafficHits').textContent=traffic.totalHits.toLocaleString();document.getElementById('trafficErrorRate').textContent=traffic.errorRatePercent.toFixed(2)+'%';"
                 + "const uriFilter=(document.getElementById('uriFilter').value||'').toLowerCase();document.getElementById('trafficRows').innerHTML=traffic.uris.filter(i=>i.uri.toLowerCase().includes(uriFilter)).map(i=>'<tr><td>'+escapeHtml(i.uri)+'</td><td>'+i.hits+'</td><td>'+i.avgMs.toFixed(1)+' ms</td><td>'+i.p95Ms.toFixed(1)+' ms</td><td>'+i.maxMs+' ms</td><td>'+i.errors+' ('+i.errorRatePercent.toFixed(1)+'%)</td></tr>').join('')||'<tr><td colspan=\"6\" class=\"muted\">No matching HTTP traffic.</td></tr>';document.getElementById('alertRows').innerHTML=alerts.alerts.map(a=>'<tr><td><span class=\"pill error\">'+a.type+'</span></td><td>'+escapeHtml(a.scope)+'</td><td>'+a.value+'</td><td>'+a.threshold+'</td></tr>').join('')||'<tr><td colspan=\"4\" class=\"muted\">No active alerts.</td></tr>';"
                 + "const max=Math.max(...timeline.points.map(p=>p.heapUsagePct),1);document.getElementById('timeline').innerHTML=timeline.points.map(p=>'<div class=\"bar\" title=\"'+p.heapUsagePct.toFixed(1)+'%\" style=\"height:'+Math.max(8,(p.heapUsagePct/max)*100)+'%\"></div>').join('');"
                 + "document.getElementById('sqlTop').innerHTML=top.items.map(i=>'<tr><td>'+escapeHtml(i.sql)+'</td><td>'+i.count+'</td><td>'+i.avgMs.toFixed(1)+' ms</td><td>'+i.maxMs+' ms</td></tr>').join('')||'<tr><td colspan=\"4\" class=\"muted\">No SQL data has been captured yet.</td></tr>';"
                 + "document.getElementById('slowRows').innerHTML=slow.items.map(i=>'<tr><td>'+new Date(i.timestamp).toLocaleTimeString()+'</td><td><span class=\"pill '+i.status.toLowerCase()+'\">'+i.status+'</span></td><td>'+i.durationMs+' ms</td><td>'+escapeHtml(i.sql)+'</td></tr>').join('')||'<tr><td colspan=\"4\" class=\"muted\">No slow queries have been captured recently.</td></tr>';"
                 + "document.getElementById('errorRows').innerHTML=errors.items.map(i=>'<tr><td>'+new Date(i.timestamp).toLocaleTimeString()+'</td><td>'+escapeHtml(i.uri)+'</td><td><span class=\"pill error\">'+i.status+'</span></td><td>'+escapeHtml(i.message)+'</td></tr>').join('')||'<tr><td colspan=\"4\" class=\"muted\">No exceptions or HTTP 5xx errors captured recently.</td></tr>';"
-                + "document.getElementById('sqlPoints').innerHTML=sqlTimeline.points.slice(-120).map(p=>'<span class=\"sql-point '+p.color+'\" title=\"'+p.durationMs+' ms · '+escapeHtml(p.sql)+'\"></span>').join('')||'<span class=\"muted\">No SQL timeline data yet.</span>';document.getElementById('collectorQueue').textContent=collector.queueSize+'/'+collector.capacity;document.getElementById('collectorDropped').textContent=collector.dropped;document.getElementById('collectorSent').textContent=collector.sent;"
+                + "renderSqlHeatmap(sqlTimeline.points.slice(-120));document.getElementById('collectorQueue').textContent=collector.queueSize+'/'+collector.capacity;document.getElementById('collectorDropped').textContent=collector.dropped;document.getElementById('collectorSent').textContent=collector.sent;"
                 + "const trendPoints=trafficTimeline.points.slice(-30),maxTps=Math.max(...trendPoints.map(p=>p.tps),1);document.getElementById('trafficTrend').innerHTML=trendPoints.map(p=>'<span class=\"trend-item\" title=\"Active '+p.activeRequests+' · Error '+p.errorRatePercent.toFixed(2)+'%\"><b>'+p.tps+'</b><i style=\"height:'+Math.max(4,(p.tps/maxTps)*90)+'px\"></i></span>').join('')||'<span class=\"muted\">No WAS trend data yet.</span>';"
-                + "document.getElementById('collectorRows').innerHTML=(collectorSummary.items||[]).slice(0,100).map(i=>'<tr><td>'+new Date(i.bucket).toLocaleString()+'</td><td>'+escapeHtml(i.service)+'</td><td>'+escapeHtml(i.type)+'</td><td>'+i.count+'</td><td>'+i.errors+'</td><td>'+i.maxDurationMs+' ms</td></tr>').join('')||'<tr><td colspan=\"6\" class=\"muted\">Collector history unavailable or empty.</td></tr>';"
-                + "}function escapeHtml(v){return String(v||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');}load();setInterval(load,2000);"
+                + "document.getElementById('collectorRows').innerHTML=(collectorSummary.items||[]).slice(0,100).map(i=>'<tr><td>'+new Date(i.bucket).toLocaleString()+'</td><td>'+escapeHtml(i.service)+'</td><td>'+escapeHtml(i.type)+'</td><td>'+i.count+'</td><td>'+i.errors+'</td><td>'+i.maxDurationMs+' ms</td></tr>').join('')||'<tr><td colspan=\"6\" class=\"muted\">수집기 이력이 없습니다.</td></tr>';"
+                + "}let previousInTps=null,previousComboTier=0,comboTimer=null;function updateTrafficPulse(inTps,outTps,timeline,active){const incoming=Math.max(0,Number(inTps)||0),outgoing=Math.max(0,Number(outTps)||0),load=Math.max(incoming,outgoing),speed=Math.max(.4,2.8/(1+load/55)),inSpeed=Math.max(.4,2.8/(1+incoming/55)),outSpeed=Math.max(.4,2.8/(1+outgoing/55)),stage=document.getElementById('flowStage'),loadBadge=document.getElementById('trafficLoad'),level=load===0?'idle':load>=300?'high':load>=100?'medium':'low';stage.style.setProperty('--flow-speed',speed.toFixed(2)+'s');stage.style.setProperty('--flow-in-speed',inSpeed.toFixed(2)+'s');stage.style.setProperty('--flow-out-speed',outSpeed.toFixed(2)+'s');stage.classList.remove('idle','level-low','level-medium','level-high');stage.classList.add('level-'+level);loadBadge.className='load-badge'+(level==='medium'?' medium':level==='high'?' high':'');loadBadge.textContent=level==='high'?'트래픽 급증':level==='medium'?'혼잡':level==='low'?'활성':'IDLE';document.getElementById('flowInRate').textContent=incoming+' /s';document.getElementById('flowOutRate').textContent=outgoing+' /s';const comboTier=incoming>=110?Math.floor((incoming-100)/10):0,card=document.getElementById('tpsKpi'),badge=document.getElementById('trafficCombo');card.classList.remove('tps-low','tps-medium','tps-high','tps-idle');card.classList.add('tps-'+level);if(comboTier>previousComboTier&&comboTier>0){const combo=Math.min(5,comboTier-Math.max(0,previousComboTier));card.style.setProperty('--punch-scale',(1+Math.min(.22,combo*.045)).toFixed(2));card.classList.remove('punch');void card.offsetWidth;card.classList.add('punch');badge.textContent='COMBO ×'+combo;badge.classList.add('combo-hit');if(comboTimer)clearTimeout(comboTimer);comboTimer=setTimeout(()=>{card.classList.remove('punch');badge.classList.remove('combo-hit');badge.textContent=level==='idle'?'IDLE':'흐르는 중';},950);}else if(previousInTps===null){badge.textContent=level==='idle'?'IDLE':'흐르는 중';}previousComboTier=comboTier;previousInTps=incoming;}function renderSqlHeatmap(points){const plot=document.getElementById('sqlPoints'),yAxis=document.getElementById('sqlYAxis'),xAxis=document.getElementById('sqlXAxis'),pick=document.getElementById('sqlPick'),now=Date.now(),windowMs=300000,start=now-windowMs,visible=points.filter(p=>p.timestamp>=start&&p.timestamp<=now);if(!visible.length){plot.innerHTML='';yAxis.innerHTML='<span>—</span>';xAxis.innerHTML='<span>5분 전</span><span>2분 30초 전</span><span>지금</span>';pick.textContent='최근 5분 내 SQL 실행 데이터가 없습니다.';return;}const maxMs=Math.max(1,...visible.map(p=>p.durationMs));yAxis.innerHTML='<span>'+maxMs+' ms</span><span>'+Math.round(maxMs*.75)+' ms</span><span>'+Math.round(maxMs*.5)+' ms</span><span>'+Math.round(maxMs*.25)+' ms</span><span>0 ms</span>';xAxis.innerHTML='<span>5분 전</span><span>2분 30초 전</span><span>지금</span>';const existing=new Map(Array.from(plot.children).map(dot=>[dot.dataset.key,dot])),seen={};visible.forEach((p,i)=>{const base=p.timestamp+':'+p.durationMs+':'+p.color+':'+p.sql,ordinal=seen[base]=(seen[base]||0)+1,key=base+':'+ordinal;let dot=existing.get(key);if(dot){existing.delete(key);}else{dot=document.createElement('button');dot.type='button';dot.className='sql-point '+p.color;dot.dataset.key=key;plot.appendChild(dot);}dot.dataset.index=i;dot.setAttribute('aria-label',p.durationMs+' ms at '+new Date(p.timestamp).toLocaleTimeString());dot.title=p.durationMs+' ms · '+new Date(p.timestamp).toLocaleTimeString();dot.style.left=Math.max(0,Math.min(100,(p.timestamp-start)/windowMs*100))+'%';dot.style.bottom=Math.max(1,p.durationMs/maxMs*96)+'%';});existing.forEach(dot=>dot.remove());plot._heatmapPoints=visible;plot.onpointerover=plot.onfocusin=plot.onclick=function(e){const dot=e.target.closest('.sql-point');if(!dot)return;plot.querySelectorAll('.selected').forEach(n=>n.classList.remove('selected'));dot.classList.add('selected');const p=plot._heatmapPoints[Number(dot.dataset.index)];if(!p)return;pick.innerHTML='<strong>'+p.durationMs+' ms</strong><span>'+new Date(p.timestamp).toLocaleString()+'</span><code class=\"sql-pick-code\"></code>';pick.querySelector('code').textContent=p.sql;};}function escapeHtml(v){return String(v||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');}load();setInterval(load,2000);"
                 + "</script></body></html>";
     }
 
@@ -530,7 +659,7 @@ public class APMLiteAgent {
         }
 
         private void offer(TrafficSnapshot snapshot) {
-            offer("{\"type\":\"TRAFFIC\",\"service\":\"" + escapeJson(CONFIG.serviceName) + "\",\"timestamp\":" + snapshot.timestamp + ",\"tps\":" + snapshot.tps + ",\"activeRequests\":" + snapshot.activeRequests + ",\"errorRatePercent\":" + snapshot.errorRatePercent + "}");
+            offer("{\"type\":\"TRAFFIC\",\"service\":\"" + escapeJson(CONFIG.serviceName) + "\",\"timestamp\":" + snapshot.timestamp + ",\"tps\":" + snapshot.tps + ",\"responsesPerSecond\":" + snapshot.responsesPerSecond + ",\"activeRequests\":" + snapshot.activeRequests + ",\"errorRatePercent\":" + snapshot.errorRatePercent + "}");
         }
 
         private void offer(String event) {
@@ -867,11 +996,14 @@ public class APMLiteAgent {
         private static final int MAX_URI_STATS = 1000;
         private final AtomicLong totalHits = new AtomicLong();
         private final AtomicLong totalErrors = new AtomicLong();
+        private final AtomicLong totalCompleted = new AtomicLong();
         private final AtomicLong activeRequests = new AtomicLong();
         private final AtomicLong lastHitsBase = new AtomicLong();
         private final AtomicLong lastErrorsBase = new AtomicLong();
+        private final AtomicLong lastCompletedBase = new AtomicLong();
         private volatile long lastHitsRotateNanos = System.nanoTime();
         private volatile long hitsPerSecond;
+        private volatile long responsesPerSecond;
         private volatile double errorRatePercent;
         private final ConcurrentHashMap<String, TrafficStat> uriStats = new ConcurrentHashMap<String, TrafficStat>();
         private final Deque<HttpErrorEvent> recentErrors = new ConcurrentLinkedDeque<HttpErrorEvent>();
@@ -889,6 +1021,7 @@ public class APMLiteAgent {
         }
 
         private void observe(Object request, Object response, long durationNanos, Throwable thrown) {
+            totalCompleted.incrementAndGet();
             String uri = requestUri(request);
             TrafficStat stat = getOrCreate(uri);
             int status = responseStatus(response);
@@ -919,6 +1052,9 @@ public class APMLiteAgent {
             long currentErrors = totalErrors.get();
             long errors = currentErrors - lastErrorsBase.getAndSet(currentErrors);
             hitsPerSecond = elapsedNanos <= 0L ? hits : Math.round(hits * (1_000_000_000D / elapsedNanos));
+            long completed = totalCompleted.get();
+            long completedDelta = completed - lastCompletedBase.getAndSet(completed);
+            responsesPerSecond = elapsedNanos <= 0L ? completedDelta : Math.round(completedDelta * (1_000_000_000D / elapsedNanos));
             errorRatePercent = hits <= 0L ? 0D : errors * 100D / hits;
             for (TrafficStat stat : uriStats.values()) {
                 stat.rotateHitsPerSecond(elapsedNanos);
@@ -948,6 +1084,7 @@ public class APMLiteAgent {
                     + "\"totalHits\":" + totalHits.get() + ","
                     + "\"hitsPerSecond\":" + hitsPerSecond + ","
                     + "\"tps\":" + hitsPerSecond + ","
+                    + "\"responsesPerSecond\":" + responsesPerSecond + ","
                     + "\"errorRatePercent\":" + formatDouble(errorRatePercent) + ","
                     + "\"activeRequests\":" + activeRequests.get() + ","
                     + "\"uniqueUsers\":null,"
@@ -960,6 +1097,7 @@ public class APMLiteAgent {
             TrafficSnapshot snapshot = new TrafficSnapshot();
             snapshot.timestamp = System.currentTimeMillis();
             snapshot.tps = hitsPerSecond;
+            snapshot.responsesPerSecond = responsesPerSecond;
             snapshot.activeRequests = activeRequests.get();
             snapshot.errorRatePercent = errorRatePercent;
             return snapshot;
@@ -977,6 +1115,7 @@ public class APMLiteAgent {
                 if (index++ > 0) sb.append(',');
                 sb.append("{\"timestamp\":").append(point.timestamp)
                         .append(",\"tps\":").append(point.tps)
+                        .append(",\"responsesPerSecond\":").append(point.responsesPerSecond)
                         .append(",\"activeRequests\":").append(point.activeRequests)
                         .append(",\"errorRatePercent\":").append(formatDouble(point.errorRatePercent)).append('}');
             }
@@ -1025,7 +1164,14 @@ public class APMLiteAgent {
                 Object value = method.invoke(request);
                 return truncate(value == null ? "unknown" : String.valueOf(value), 200);
             } catch (Throwable ignored) {
-                return "unknown";
+                try {
+                    Object webRequest = request.getClass().getMethod("getRequest").invoke(request);
+                    Object uri = webRequest.getClass().getMethod("getURI").invoke(webRequest);
+                    Object path = uri.getClass().getMethod("getPath").invoke(uri);
+                    return truncate(path == null ? "unknown" : String.valueOf(path), 200);
+                } catch (Throwable ignoredAgain) {
+                    return "unknown";
+                }
             }
         }
 
@@ -1036,7 +1182,13 @@ public class APMLiteAgent {
                 Object value = method.invoke(response);
                 return value instanceof Number ? ((Number) value).intValue() : 0;
             } catch (Throwable ignored) {
-                return 0;
+                try {
+                    Object status = response.getClass().getMethod("getStatusCode").invoke(response);
+                    Object value = status.getClass().getMethod("value").invoke(status);
+                    return value instanceof Number ? ((Number) value).intValue() : 0;
+                } catch (Throwable ignoredAgain) {
+                    return 0;
+                }
             }
         }
 
@@ -1209,6 +1361,7 @@ public class APMLiteAgent {
     private static final class TrafficSnapshot {
         private long timestamp;
         private long tps;
+        private long responsesPerSecond;
         private long activeRequests;
         private double errorRatePercent;
     }

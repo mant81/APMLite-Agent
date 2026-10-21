@@ -15,7 +15,7 @@
     <maven.compiler.source>1.8</maven.compiler.source>
     <maven.compiler.target>1.8</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <bytebuddy.version>1.14.12</bytebuddy.version>
+    <bytebuddy.version>1.17.8</bytebuddy.version>
     <mariadb.version>2.7.10</mariadb.version>
   </properties>
 
