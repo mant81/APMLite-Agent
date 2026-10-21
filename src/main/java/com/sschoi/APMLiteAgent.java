@@ -178,6 +178,7 @@ public class APMLiteAgent {
                 STORE.addTimelinePoint(snapshot);
                 COLLECTOR.offer(snapshot);
                 COLLECTOR.offer(TRAFFIC.snapshot());
+                TRAFFIC.addTimelinePoint();
                 persistSnapshot(snapshot);
             } catch (Exception e) {
                 log("JVM sampler error: " + e.getMessage());
@@ -255,6 +256,7 @@ public class APMLiteAgent {
             server.createContext("/api/sql/timeline", exchange -> writeResponse(exchange, "application/json; charset=utf-8", STORE.sqlTimelineJson()));
             server.createContext("/api/traffic", exchange -> writeResponse(exchange, "application/json; charset=utf-8", TRAFFIC.json()));
             server.createContext("/api/traffic/errors", exchange -> writeResponse(exchange, "application/json; charset=utf-8", TRAFFIC.errorsJson()));
+            server.createContext("/api/traffic/timeline", exchange -> writeResponse(exchange, "application/json; charset=utf-8", TRAFFIC.timelineJson()));
             server.createContext("/api/alerts", exchange -> writeResponse(exchange, "application/json; charset=utf-8", TRAFFIC.alertsJson()));
             server.createContext("/api/collector/status", exchange -> writeResponse(exchange, "application/json; charset=utf-8", COLLECTOR.statusJson()));
             server.setExecutor(Executors.newCachedThreadPool(namedFactory("apmlite-http")));
@@ -437,6 +439,7 @@ public class APMLiteAgent {
                 + "<div class=\"card\"><div class=\"label\">Slow Queries</div><div class=\"value\" id=\"slowCount\">-</div><div class=\"muted\">Total captured slow or error queries</div></div>"
                 + "</div>"
                 + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">WAS Traffic</div><div class=\"metric-list\"><div><span class=\"muted\">TPS</span><strong id=\"trafficTps\">-</strong></div><div><span class=\"muted\">Active</span><strong id=\"trafficActive\">-</strong></div><div><span class=\"muted\">Errors</span><strong id=\"trafficErrorRate\">-</strong></div><div><span class=\"muted\">Users</span><strong id=\"trafficUsers\">Unknown</strong></div><div><span class=\"muted\">Alerts</span><strong id=\"alertState\">-</strong></div></div><table class=\"table\"><thead><tr><th>URI</th><th>Hits</th><th>Avg</th><th>Max</th><th>Errors</th></tr></thead><tbody id=\"trafficRows\"></tbody></table></div>"
+                + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">WAS Trend</div><div class=\"muted\">Recent TPS and active request samples</div><div id=\"trafficTrend\" class=\"sql-points\"></div></div>"
                 + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Active Alerts</div><table class=\"table\"><thead><tr><th>Type</th><th>Scope</th><th>Value</th><th>Threshold</th></tr></thead><tbody id=\"alertRows\"></tbody></table></div>"
                 + "<div class=\"split\">"
                 + "<div class=\"card\"><div class=\"label\">Heap Timeline</div><div id=\"timeline\"></div></div>"
@@ -446,7 +449,7 @@ public class APMLiteAgent {
                 + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Recent Exceptions and HTTP Errors</div><table class=\"table\"><thead><tr><th>Time</th><th>URI</th><th>Status</th><th>Message</th></tr></thead><tbody id=\"errorRows\"></tbody></table></div>"
                 + "<div class=\"split\"><div class=\"card\"><div class=\"label\">SQL Execution Timeline</div><div class=\"muted\">Green &lt; 3s · Yellow 3–10s · Red ≥ 10s · Purple error</div><div id=\"sqlPoints\" class=\"sql-points\"></div></div><div class=\"card\"><div class=\"label\">Collector</div><div class=\"metric-list\"><div><span class=\"muted\">Queue</span><strong id=\"collectorQueue\">-</strong></div><div><span class=\"muted\">Dropped</span><strong id=\"collectorDropped\">-</strong></div><div><span class=\"muted\">Sent</span><strong id=\"collectorSent\">-</strong></div></div></div></div>"
                 + "</div><script>"
-                + "async function load(){const [overview,timeline,top,slow,traffic,alerts,sqlTimeline,collector,errors]=await Promise.all([fetch('/api/overview').then(r=>r.json()),fetch('/api/timeline').then(r=>r.json()),fetch('/api/sql/top').then(r=>r.json()),fetch('/api/sql/slow').then(r=>r.json()),fetch('/api/traffic').then(r=>r.json()),fetch('/api/alerts').then(r=>r.json()),fetch('/api/sql/timeline').then(r=>r.json()),fetch('/api/collector/status').then(r=>r.json()),fetch('/api/traffic/errors').then(r=>r.json())]);"
+                + "async function load(){const [overview,timeline,top,slow,traffic,alerts,sqlTimeline,collector,errors,trafficTimeline]=await Promise.all([fetch('/api/overview').then(r=>r.json()),fetch('/api/timeline').then(r=>r.json()),fetch('/api/sql/top').then(r=>r.json()),fetch('/api/sql/slow').then(r=>r.json()),fetch('/api/traffic').then(r=>r.json()),fetch('/api/alerts').then(r=>r.json()),fetch('/api/sql/timeline').then(r=>r.json()),fetch('/api/collector/status').then(r=>r.json()),fetch('/api/traffic/errors').then(r=>r.json()),fetch('/api/traffic/timeline').then(r=>r.json())]);"
                 + "document.getElementById('service').textContent=overview.serviceName;"
                 + "document.getElementById('heapPct').textContent=overview.heapUsagePct.toFixed(1)+'%';"
                 + "document.getElementById('heapDetail').textContent=overview.heapUsedMb.toFixed(1)+' MB / '+overview.heapMaxMb.toFixed(1)+' MB';"
@@ -463,6 +466,7 @@ public class APMLiteAgent {
                 + "document.getElementById('slowRows').innerHTML=slow.items.map(i=>'<tr><td>'+new Date(i.timestamp).toLocaleTimeString()+'</td><td><span class=\"pill '+i.status.toLowerCase()+'\">'+i.status+'</span></td><td>'+i.durationMs+' ms</td><td>'+escapeHtml(i.sql)+'</td></tr>').join('')||'<tr><td colspan=\"4\" class=\"muted\">No slow queries have been captured recently.</td></tr>';"
                 + "document.getElementById('errorRows').innerHTML=errors.items.map(i=>'<tr><td>'+new Date(i.timestamp).toLocaleTimeString()+'</td><td>'+escapeHtml(i.uri)+'</td><td><span class=\"pill error\">'+i.status+'</span></td><td>'+escapeHtml(i.message)+'</td></tr>').join('')||'<tr><td colspan=\"4\" class=\"muted\">No exceptions or HTTP 5xx errors captured recently.</td></tr>';"
                 + "document.getElementById('sqlPoints').innerHTML=sqlTimeline.points.slice(-120).map(p=>'<span class=\"sql-point '+p.color+'\" title=\"'+p.durationMs+' ms · '+escapeHtml(p.sql)+'\"></span>').join('')||'<span class=\"muted\">No SQL timeline data yet.</span>';document.getElementById('collectorQueue').textContent=collector.queueSize+'/'+collector.capacity;document.getElementById('collectorDropped').textContent=collector.dropped;document.getElementById('collectorSent').textContent=collector.sent;"
+                + "const maxTps=Math.max(...trafficTimeline.points.map(p=>p.tps),1);document.getElementById('trafficTrend').innerHTML=trafficTimeline.points.slice(-120).map(p=>'<span class=\"sql-point green\" style=\"height:'+Math.max(8,(p.tps/maxTps)*80)+'px\" title=\"TPS '+p.tps+' · Active '+p.activeRequests+' · Error '+p.errorRatePercent.toFixed(2)+'%\"></span>').join('')||'<span class=\"muted\">No WAS trend data yet.</span>';"
                 + "}function escapeHtml(v){return String(v||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');}load();setInterval(load,2000);"
                 + "</script></body></html>";
     }
@@ -830,6 +834,7 @@ public class APMLiteAgent {
         private volatile double errorRatePercent;
         private final ConcurrentHashMap<String, TrafficStat> uriStats = new ConcurrentHashMap<String, TrafficStat>();
         private final Deque<HttpErrorEvent> recentErrors = new ConcurrentLinkedDeque<HttpErrorEvent>();
+        private final Deque<TrafficSnapshot> timeline = new ConcurrentLinkedDeque<TrafficSnapshot>();
 
         private void enter(Object request) {
             totalHits.incrementAndGet();
@@ -916,6 +921,24 @@ public class APMLiteAgent {
             snapshot.activeRequests = activeRequests.get();
             snapshot.errorRatePercent = errorRatePercent;
             return snapshot;
+        }
+
+        private void addTimelinePoint() {
+            timeline.addLast(snapshot());
+            while (timeline.size() > 180) timeline.pollFirst();
+        }
+
+        private String timelineJson() {
+            StringBuilder sb = new StringBuilder("{\"points\":[");
+            int index = 0;
+            for (TrafficSnapshot point : timeline) {
+                if (index++ > 0) sb.append(',');
+                sb.append("{\"timestamp\":").append(point.timestamp)
+                        .append(",\"tps\":").append(point.tps)
+                        .append(",\"activeRequests\":").append(point.activeRequests)
+                        .append(",\"errorRatePercent\":").append(formatDouble(point.errorRatePercent)).append('}');
+            }
+            return sb.append("]}").toString();
         }
 
         private String alertsJson() {
