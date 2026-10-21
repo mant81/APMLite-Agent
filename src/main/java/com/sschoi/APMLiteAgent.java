@@ -49,12 +49,13 @@ public class APMLiteAgent {
     private static final ExecutorService DB_EXECUTOR = Executors.newSingleThreadExecutor(namedFactory("apmlite-db"));
     private static final ScheduledExecutorService SCHEDULER = Executors.newScheduledThreadPool(2, namedFactory("apmlite-scheduler"));
 
-    public static void recordHttpEnter() {
-        TRAFFIC.enter();
+    public static void recordHttpEnter(Object request) {
+        TRAFFIC.enter(request);
     }
 
-    public static void recordHttpExit() {
+    public static void recordHttpExit(Object request, long durationNanos, Throwable thrown) {
         TRAFFIC.exit();
+        TRAFFIC.observe(request, durationNanos, thrown);
     }
 
     public static void premain(String agentArgs, Instrumentation inst) {
@@ -284,13 +285,16 @@ public class APMLiteAgent {
 
     public static class HttpServiceAdvice {
         @Advice.OnMethodEnter
-        public static void onEnter() {
-            APMLiteAgent.recordHttpEnter();
+        public static long onEnter(@Advice.Argument(0) Object request) {
+            APMLiteAgent.recordHttpEnter(request);
+            return System.nanoTime();
         }
 
         @Advice.OnMethodExit(onThrowable = Throwable.class)
-        public static void onExit() {
-            APMLiteAgent.recordHttpExit();
+        public static void onExit(@Advice.Enter long startedAt,
+                                  @Advice.Argument(0) Object request,
+                                  @Advice.Thrown Throwable thrown) {
+            APMLiteAgent.recordHttpExit(request, System.nanoTime() - startedAt, thrown);
         }
     }
 
@@ -697,19 +701,32 @@ public class APMLiteAgent {
     }
 
     private static final class TrafficMetrics {
+        private static final int MAX_URI_STATS = 1000;
         private final AtomicLong totalHits = new AtomicLong();
         private final AtomicLong activeRequests = new AtomicLong();
         private final AtomicLong lastHitsBase = new AtomicLong();
         private volatile long lastHitsRotateNanos = System.nanoTime();
         private volatile long hitsPerSecond;
+        private final ConcurrentHashMap<String, TrafficStat> uriStats = new ConcurrentHashMap<String, TrafficStat>();
 
-        private void enter() {
+        private void enter(Object request) {
             totalHits.incrementAndGet();
             activeRequests.incrementAndGet();
+            TrafficStat stat = getOrCreate(requestUri(request));
+            if (stat != null) stat.active.incrementAndGet();
         }
 
         private void exit() {
             activeRequests.updateAndGet(value -> value > 0 ? value - 1 : 0);
+        }
+
+        private void observe(Object request, long durationNanos, Throwable thrown) {
+            String uri = requestUri(request);
+            TrafficStat stat = getOrCreate(uri);
+            if (stat != null) {
+                stat.observe(durationNanos, thrown != null);
+                stat.active.updateAndGet(value -> value > 0 ? value - 1 : 0);
+            }
         }
 
         private long rotateHitsPerSecond() {
@@ -724,12 +741,83 @@ public class APMLiteAgent {
         }
 
         private String json() {
+            List<TrafficStat> stats = new ArrayList<TrafficStat>(uriStats.values());
+            stats.sort(Comparator.comparingLong(TrafficStat::totalTimeNanos).reversed());
+            StringBuilder items = new StringBuilder("[");
+            int limit = Math.min(20, stats.size());
+            for (int i = 0; i < limit; i++) {
+                TrafficStat stat = stats.get(i);
+                if (i > 0) items.append(',');
+                items.append("{\"uri\":\"").append(escapeJson(stat.uri)).append("\",")
+                        .append("\"hits\":").append(stat.hits.get()).append(',')
+                        .append("\"active\":").append(stat.active.get()).append(',')
+                        .append("\"avgMs\":").append(formatDouble(stat.averageMs())).append(',')
+                        .append("\"maxMs\":").append(TimeUnit.NANOSECONDS.toMillis(stat.maxNanos.get())).append(',')
+                        .append("\"errors\":").append(stat.errors.get()).append('}');
+            }
+            items.append(']');
             return "{"
                     + "\"totalHits\":" + totalHits.get() + ","
                     + "\"hitsPerSecond\":" + hitsPerSecond + ","
                     + "\"tps\":" + hitsPerSecond + ","
-                    + "\"activeRequests\":" + activeRequests.get()
+                    + "\"activeRequests\":" + activeRequests.get() + ","
+                    + "\"uniqueUsers\":null,"
+                    + "\"uniqueUsersStatus\":\"unknown\","
+                    + "\"uris\":" + items
                     + "}";
+        }
+
+        private String requestUri(Object request) {
+            if (request == null) return "unknown";
+            try {
+                Method method = request.getClass().getMethod("getRequestURI");
+                Object value = method.invoke(request);
+                return truncate(value == null ? "unknown" : String.valueOf(value), 200);
+            } catch (Throwable ignored) {
+                return "unknown";
+            }
+        }
+
+        private TrafficStat getOrCreate(String uri) {
+            TrafficStat stat = uriStats.get(uri);
+            if (stat == null && uriStats.size() < MAX_URI_STATS) {
+                TrafficStat candidate = new TrafficStat(uri);
+                TrafficStat existing = uriStats.putIfAbsent(uri, candidate);
+                stat = existing == null ? candidate : existing;
+            }
+            return stat;
+        }
+    }
+
+    private static final class TrafficStat {
+        private final String uri;
+        private final AtomicLong hits = new AtomicLong();
+        private final AtomicLong active = new AtomicLong();
+        private final AtomicLong totalNanos = new AtomicLong();
+        private final AtomicLong maxNanos = new AtomicLong();
+        private final AtomicLong errors = new AtomicLong();
+
+        private TrafficStat(String uri) { this.uri = uri; }
+
+        private void observe(long durationNanos, boolean error) {
+            hits.incrementAndGet();
+            totalNanos.addAndGet(durationNanos);
+            updateMax(durationNanos);
+            if (error) errors.incrementAndGet();
+        }
+
+        private void updateMax(long value) {
+            long previous;
+            do {
+                previous = maxNanos.get();
+                if (value <= previous) return;
+            } while (!maxNanos.compareAndSet(previous, value));
+        }
+
+        private long totalTimeNanos() { return totalNanos.get(); }
+        private double averageMs() {
+            long count = hits.get();
+            return count == 0 ? 0D : (totalNanos.get() / 1_000_000D) / count;
         }
     }
 
