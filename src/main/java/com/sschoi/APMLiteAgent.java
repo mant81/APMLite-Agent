@@ -45,8 +45,17 @@ public class APMLiteAgent {
 
     private static final Config CONFIG = new Config();
     private static final MetricsStore STORE = new MetricsStore();
+    private static final TrafficMetrics TRAFFIC = new TrafficMetrics();
     private static final ExecutorService DB_EXECUTOR = Executors.newSingleThreadExecutor(namedFactory("apmlite-db"));
     private static final ScheduledExecutorService SCHEDULER = Executors.newScheduledThreadPool(2, namedFactory("apmlite-scheduler"));
+
+    public static void recordHttpEnter() {
+        TRAFFIC.enter();
+    }
+
+    public static void recordHttpExit() {
+        TRAFFIC.exit();
+    }
 
     public static void premain(String agentArgs, Instrumentation inst) {
         CONFIG.apply(agentArgs);
@@ -56,6 +65,7 @@ public class APMLiteAgent {
         startJvmSampler();
         startHttpServer();
         installJdbcInstrumentation(inst);
+        installHttpInstrumentation(inst);
 
         log("Agent ready. Dashboard: http://127.0.0.1:" + CONFIG.httpPort);
     }
@@ -155,6 +165,7 @@ public class APMLiteAgent {
                 snapshot.processCpuLoad = CpuSampler.readProcessCpuLoad();
                 snapshot.systemCpuLoad = CpuSampler.readSystemCpuLoad();
                 snapshot.queriesPerSec = STORE.rotateQueriesPerSecond();
+                TRAFFIC.rotateHitsPerSecond();
 
                 STORE.setSnapshot(snapshot);
                 STORE.addTimelinePoint(snapshot);
@@ -232,10 +243,11 @@ public class APMLiteAgent {
             server.createContext("/api/timeline", exchange -> writeResponse(exchange, "application/json; charset=utf-8", STORE.timelineJson()));
             server.createContext("/api/sql/top", exchange -> writeResponse(exchange, "application/json; charset=utf-8", STORE.topSqlJson()));
             server.createContext("/api/sql/slow", exchange -> writeResponse(exchange, "application/json; charset=utf-8", STORE.slowQueriesJson()));
+            server.createContext("/api/traffic", exchange -> writeResponse(exchange, "application/json; charset=utf-8", TRAFFIC.json()));
             server.setExecutor(Executors.newCachedThreadPool(namedFactory("apmlite-http")));
             server.start();
         } catch (IOException e) {
-            throw new IllegalStateException("Failed to start dashboard on port " + CONFIG.httpPort, e);
+            log("Dashboard disabled on port " + CONFIG.httpPort + ": " + e.getMessage());
         }
     }
 
@@ -257,6 +269,29 @@ public class APMLiteAgent {
                         builder.method(ElementMatchers.named("prepareStatement").and(ElementMatchers.takesArguments(String.class)))
                                 .intercept(Advice.to(PrepareStatementAdvice.class)))
                 .installOn(inst);
+    }
+
+    private static void installHttpInstrumentation(Instrumentation inst) {
+        new AgentBuilder.Default()
+                .ignore(ElementMatchers.nameStartsWith("net.bytebuddy."))
+                .type(ElementMatchers.named("javax.servlet.http.HttpServlet")
+                        .or(ElementMatchers.named("jakarta.servlet.http.HttpServlet")))
+                .transform((builder, typeDescription, classLoader, module, protectionDomain) ->
+                        builder.method(ElementMatchers.named("service"))
+                                .intercept(Advice.to(HttpServiceAdvice.class)))
+                .installOn(inst);
+    }
+
+    public static class HttpServiceAdvice {
+        @Advice.OnMethodEnter
+        public static void onEnter() {
+            APMLiteAgent.recordHttpEnter();
+        }
+
+        @Advice.OnMethodExit(onThrowable = Throwable.class)
+        public static void onExit() {
+            APMLiteAgent.recordHttpExit();
+        }
     }
 
     public static class PrepareStatementAdvice {
@@ -658,6 +693,43 @@ public class APMLiteAgent {
             }
             String normalized = sql.replaceAll("\\s+", " ").trim();
             return truncate(normalized, 180);
+        }
+    }
+
+    private static final class TrafficMetrics {
+        private final AtomicLong totalHits = new AtomicLong();
+        private final AtomicLong activeRequests = new AtomicLong();
+        private final AtomicLong lastHitsBase = new AtomicLong();
+        private volatile long lastHitsRotateNanos = System.nanoTime();
+        private volatile long hitsPerSecond;
+
+        private void enter() {
+            totalHits.incrementAndGet();
+            activeRequests.incrementAndGet();
+        }
+
+        private void exit() {
+            activeRequests.updateAndGet(value -> value > 0 ? value - 1 : 0);
+        }
+
+        private long rotateHitsPerSecond() {
+            long current = totalHits.get();
+            long previous = lastHitsBase.getAndSet(current);
+            long now = System.nanoTime();
+            long elapsedNanos = now - lastHitsRotateNanos;
+            lastHitsRotateNanos = now;
+            long hits = current - previous;
+            hitsPerSecond = elapsedNanos <= 0L ? hits : Math.round(hits * (1_000_000_000D / elapsedNanos));
+            return hitsPerSecond;
+        }
+
+        private String json() {
+            return "{"
+                    + "\"totalHits\":" + totalHits.get() + ","
+                    + "\"hitsPerSecond\":" + hitsPerSecond + ","
+                    + "\"tps\":" + hitsPerSecond + ","
+                    + "\"activeRequests\":" + activeRequests.get()
+                    + "}";
         }
     }
 
