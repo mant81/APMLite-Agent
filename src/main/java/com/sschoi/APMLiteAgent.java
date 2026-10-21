@@ -253,6 +253,7 @@ public class APMLiteAgent {
             server.createContext("/api/sql/slow", exchange -> writeResponse(exchange, "application/json; charset=utf-8", STORE.slowQueriesJson()));
             server.createContext("/api/sql/timeline", exchange -> writeResponse(exchange, "application/json; charset=utf-8", STORE.sqlTimelineJson()));
             server.createContext("/api/traffic", exchange -> writeResponse(exchange, "application/json; charset=utf-8", TRAFFIC.json()));
+            server.createContext("/api/traffic/errors", exchange -> writeResponse(exchange, "application/json; charset=utf-8", TRAFFIC.errorsJson()));
             server.createContext("/api/alerts", exchange -> writeResponse(exchange, "application/json; charset=utf-8", TRAFFIC.alertsJson()));
             server.createContext("/api/collector/status", exchange -> writeResponse(exchange, "application/json; charset=utf-8", COLLECTOR.statusJson()));
             server.setExecutor(Executors.newCachedThreadPool(namedFactory("apmlite-http")));
@@ -441,9 +442,10 @@ public class APMLiteAgent {
                 + "<div class=\"card\"><div class=\"label\">Top SQL</div><table class=\"table\"><thead><tr><th>SQL</th><th>Count</th><th>Avg</th><th>Max</th></tr></thead><tbody id=\"sqlTop\"></tbody></table></div>"
                 + "</div>"
                 + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Recent Slow Queries</div><table class=\"table\"><thead><tr><th>Time</th><th>Status</th><th>Duration</th><th>SQL</th></tr></thead><tbody id=\"slowRows\"></tbody></table></div>"
+                + "<div class=\"card\" style=\"margin-top:14px\"><div class=\"label\">Recent Exceptions and HTTP Errors</div><table class=\"table\"><thead><tr><th>Time</th><th>URI</th><th>Status</th><th>Message</th></tr></thead><tbody id=\"errorRows\"></tbody></table></div>"
                 + "<div class=\"split\"><div class=\"card\"><div class=\"label\">SQL Execution Timeline</div><div class=\"muted\">Green &lt; 3s · Yellow 3–10s · Red ≥ 10s · Purple error</div><div id=\"sqlPoints\" class=\"sql-points\"></div></div><div class=\"card\"><div class=\"label\">Collector</div><div class=\"metric-list\"><div><span class=\"muted\">Queue</span><strong id=\"collectorQueue\">-</strong></div><div><span class=\"muted\">Dropped</span><strong id=\"collectorDropped\">-</strong></div><div><span class=\"muted\">Sent</span><strong id=\"collectorSent\">-</strong></div></div></div></div>"
                 + "</div><script>"
-                + "async function load(){const [overview,timeline,top,slow,traffic,alerts,sqlTimeline,collector]=await Promise.all([fetch('/api/overview').then(r=>r.json()),fetch('/api/timeline').then(r=>r.json()),fetch('/api/sql/top').then(r=>r.json()),fetch('/api/sql/slow').then(r=>r.json()),fetch('/api/traffic').then(r=>r.json()),fetch('/api/alerts').then(r=>r.json()),fetch('/api/sql/timeline').then(r=>r.json()),fetch('/api/collector/status').then(r=>r.json())]);"
+                + "async function load(){const [overview,timeline,top,slow,traffic,alerts,sqlTimeline,collector,errors]=await Promise.all([fetch('/api/overview').then(r=>r.json()),fetch('/api/timeline').then(r=>r.json()),fetch('/api/sql/top').then(r=>r.json()),fetch('/api/sql/slow').then(r=>r.json()),fetch('/api/traffic').then(r=>r.json()),fetch('/api/alerts').then(r=>r.json()),fetch('/api/sql/timeline').then(r=>r.json()),fetch('/api/collector/status').then(r=>r.json()),fetch('/api/traffic/errors').then(r=>r.json())]);"
                 + "document.getElementById('service').textContent=overview.serviceName;"
                 + "document.getElementById('heapPct').textContent=overview.heapUsagePct.toFixed(1)+'%';"
                 + "document.getElementById('heapDetail').textContent=overview.heapUsedMb.toFixed(1)+' MB / '+overview.heapMaxMb.toFixed(1)+' MB';"
@@ -458,6 +460,7 @@ public class APMLiteAgent {
                 + "const max=Math.max(...timeline.points.map(p=>p.heapUsagePct),1);document.getElementById('timeline').innerHTML=timeline.points.map(p=>'<div class=\"bar\" title=\"'+p.heapUsagePct.toFixed(1)+'%\" style=\"height:'+Math.max(8,(p.heapUsagePct/max)*100)+'%\"></div>').join('');"
                 + "document.getElementById('sqlTop').innerHTML=top.items.map(i=>'<tr><td>'+escapeHtml(i.sql)+'</td><td>'+i.count+'</td><td>'+i.avgMs.toFixed(1)+' ms</td><td>'+i.maxMs+' ms</td></tr>').join('')||'<tr><td colspan=\"4\" class=\"muted\">No SQL data has been captured yet.</td></tr>';"
                 + "document.getElementById('slowRows').innerHTML=slow.items.map(i=>'<tr><td>'+new Date(i.timestamp).toLocaleTimeString()+'</td><td><span class=\"pill '+i.status.toLowerCase()+'\">'+i.status+'</span></td><td>'+i.durationMs+' ms</td><td>'+escapeHtml(i.sql)+'</td></tr>').join('')||'<tr><td colspan=\"4\" class=\"muted\">No slow queries have been captured recently.</td></tr>';"
+                + "document.getElementById('errorRows').innerHTML=errors.items.map(i=>'<tr><td>'+new Date(i.timestamp).toLocaleTimeString()+'</td><td>'+escapeHtml(i.uri)+'</td><td><span class=\"pill error\">'+i.status+'</span></td><td>'+escapeHtml(i.message)+'</td></tr>').join('')||'<tr><td colspan=\"4\" class=\"muted\">No exceptions or HTTP 5xx errors captured recently.</td></tr>';"
                 + "document.getElementById('sqlPoints').innerHTML=sqlTimeline.points.slice(-120).map(p=>'<span class=\"sql-point '+p.color+'\" title=\"'+p.durationMs+' ms · '+escapeHtml(p.sql)+'\"></span>').join('')||'<span class=\"muted\">No SQL timeline data yet.</span>';document.getElementById('collectorQueue').textContent=collector.queueSize+'/'+collector.capacity;document.getElementById('collectorDropped').textContent=collector.dropped;document.getElementById('collectorSent').textContent=collector.sent;"
                 + "}function escapeHtml(v){return String(v||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');}load();setInterval(load,2000);"
                 + "</script></body></html>";
@@ -821,6 +824,7 @@ public class APMLiteAgent {
         private volatile long hitsPerSecond;
         private volatile double errorRatePercent;
         private final ConcurrentHashMap<String, TrafficStat> uriStats = new ConcurrentHashMap<String, TrafficStat>();
+        private final Deque<HttpErrorEvent> recentErrors = new ConcurrentLinkedDeque<HttpErrorEvent>();
 
         private void enter(Object request) {
             totalHits.incrementAndGet();
@@ -838,7 +842,16 @@ public class APMLiteAgent {
             TrafficStat stat = getOrCreate(uri);
             int status = responseStatus(response);
             boolean error = thrown != null || status >= 500;
-            if (error) totalErrors.incrementAndGet();
+            if (error) {
+                totalErrors.incrementAndGet();
+                HttpErrorEvent event = new HttpErrorEvent();
+                event.timestamp = System.currentTimeMillis();
+                event.uri = uri;
+                event.status = status;
+                event.message = truncate(thrown == null ? "HTTP " + status : thrown.toString(), 500);
+                recentErrors.addFirst(event);
+                while (recentErrors.size() > 200) recentErrors.pollLast();
+            }
             if (stat != null) {
                 stat.observe(durationNanos, error);
                 stat.active.updateAndGet(value -> value > 0 ? value - 1 : 0);
@@ -911,6 +924,19 @@ public class APMLiteAgent {
                 }
             }
             return "{\"status\":\"" + (alerts.isEmpty() ? "OK" : "ALERT") + "\",\"alerts\":[" + String.join(",", alerts) + "]}";
+        }
+
+        private String errorsJson() {
+            StringBuilder sb = new StringBuilder("{\"items\":[");
+            int index = 0;
+            for (HttpErrorEvent event : recentErrors) {
+                if (index++ > 0) sb.append(',');
+                sb.append("{\"timestamp\":").append(event.timestamp)
+                        .append(",\"uri\":\"").append(escapeJson(event.uri))
+                        .append("\",\"status\":").append(event.status)
+                        .append(",\"message\":\"").append(escapeJson(event.message)).append("\"}");
+            }
+            return sb.append("]}").toString();
         }
 
         private String requestUri(Object request) {
@@ -1081,6 +1107,13 @@ public class APMLiteAgent {
         private String status;
         private String sql;
         private String errorMessage;
+    }
+
+    private static final class HttpErrorEvent {
+        private long timestamp;
+        private String uri;
+        private int status;
+        private String message;
     }
 
     private static final class SqlPoint {
