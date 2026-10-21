@@ -292,8 +292,8 @@ public class APMLiteAgent {
     private static void installHttpInstrumentation(Instrumentation inst) {
         new AgentBuilder.Default()
                 .ignore(ElementMatchers.nameStartsWith("net.bytebuddy."))
-                .type(ElementMatchers.named("javax.servlet.http.HttpServlet")
-                        .or(ElementMatchers.named("jakarta.servlet.http.HttpServlet")))
+                .type(ElementMatchers.hasSuperType(ElementMatchers.named("javax.servlet.http.HttpServlet"))
+                        .or(ElementMatchers.hasSuperType(ElementMatchers.named("jakarta.servlet.http.HttpServlet"))))
                 .transform((builder, typeDescription, classLoader, module, protectionDomain) ->
                         builder.method(ElementMatchers.named("service"))
                                 .intercept(Advice.to(HttpServiceAdvice.class)))
