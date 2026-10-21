@@ -244,6 +244,7 @@ public class APMLiteAgent {
             server.createContext("/api/timeline", exchange -> writeResponse(exchange, "application/json; charset=utf-8", STORE.timelineJson()));
             server.createContext("/api/sql/top", exchange -> writeResponse(exchange, "application/json; charset=utf-8", STORE.topSqlJson()));
             server.createContext("/api/sql/slow", exchange -> writeResponse(exchange, "application/json; charset=utf-8", STORE.slowQueriesJson()));
+            server.createContext("/api/sql/timeline", exchange -> writeResponse(exchange, "application/json; charset=utf-8", STORE.sqlTimelineJson()));
             server.createContext("/api/traffic", exchange -> writeResponse(exchange, "application/json; charset=utf-8", TRAFFIC.json()));
             server.setExecutor(Executors.newCachedThreadPool(namedFactory("apmlite-http")));
             server.start();
@@ -331,21 +332,21 @@ public class APMLiteAgent {
                     } finally {
                         if (methodName.startsWith("execute")) {
                             long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-                            String filledSql = fillParams(sql, params);
-                            STORE.recordSqlExecution(filledSql, durationMs, error);
+                            String normalizedSql = STORE.normalizeSql(sql);
+                            STORE.recordSqlExecution(normalizedSql, durationMs, error);
 
                             if (durationMs >= CONFIG.slowQueryThresholdMs || error != null) {
                                 SlowQueryEvent event = new SlowQueryEvent();
                                 event.timestamp = System.currentTimeMillis();
                                 event.durationMs = durationMs;
-                                event.sql = filledSql;
+                                event.sql = normalizedSql;
                                 event.status = error == null ? "SLOW" : "ERROR";
                                 event.errorMessage = error == null ? null : truncate(error.toString(), 500);
                                 STORE.addSlowQuery(event);
                                 persistSlowQuery(event);
 
                                 if (CONFIG.useLog) {
-                                    log("SQL " + event.status + " " + durationMs + "ms :: " + truncate(filledSql, 220));
+                                    log("SQL " + event.status + " " + durationMs + "ms :: " + truncate(normalizedSql, 220));
                                 }
                             }
                         }
@@ -560,6 +561,7 @@ public class APMLiteAgent {
         private final AtomicLong slowQueryCount = new AtomicLong();
         private final ConcurrentHashMap<String, SqlStat> sqlStats = new ConcurrentHashMap<String, SqlStat>();
         private final Deque<SlowQueryEvent> slowQueries = new ConcurrentLinkedDeque<SlowQueryEvent>();
+        private final Deque<SqlPoint> sqlTimeline = new ConcurrentLinkedDeque<SqlPoint>();
         private final Deque<JvmSnapshot> timeline = new ArrayDeque<JvmSnapshot>();
         private volatile JvmSnapshot latestSnapshot = new JvmSnapshot();
 
@@ -584,6 +586,10 @@ public class APMLiteAgent {
             String key = normalizeSql(sql);
             SqlStat stat = sqlStats.computeIfAbsent(key, k -> new SqlStat(k));
             stat.record(durationMs, error != null);
+            sqlTimeline.addLast(new SqlPoint(System.currentTimeMillis(), key, durationMs, error != null));
+            while (sqlTimeline.size() > 5000) {
+                sqlTimeline.pollFirst();
+            }
         }
 
         private void addSlowQuery(SlowQueryEvent event) {
@@ -689,6 +695,20 @@ public class APMLiteAgent {
             }
             sb.append("]}");
             return sb.toString();
+        }
+
+        private String sqlTimelineJson() {
+            StringBuilder sb = new StringBuilder("{\"points\":[");
+            int index = 0;
+            for (SqlPoint point : sqlTimeline) {
+                if (index++ > 0) sb.append(',');
+                String color = point.error ? "error" : point.durationMs >= 10000L ? "red" : point.durationMs >= 3000L ? "yellow" : "green";
+                sb.append("{\"timestamp\":").append(point.timestamp)
+                        .append(",\"sql\":\"").append(escapeJson(point.sql))
+                        .append("\",\"durationMs\":").append(point.durationMs)
+                        .append(",\"color\":\"").append(color).append("\"}");
+            }
+            return sb.append("]}").toString();
         }
 
         private String normalizeSql(String sql) {
@@ -909,6 +929,20 @@ public class APMLiteAgent {
         private String status;
         private String sql;
         private String errorMessage;
+    }
+
+    private static final class SqlPoint {
+        private final long timestamp;
+        private final String sql;
+        private final long durationMs;
+        private final boolean error;
+
+        private SqlPoint(long timestamp, String sql, long durationMs, boolean error) {
+            this.timestamp = timestamp;
+            this.sql = sql;
+            this.durationMs = durationMs;
+            this.error = error;
+        }
     }
 
     private static String escapeJson(String value) {
