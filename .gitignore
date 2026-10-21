@@ -1,1 +1,3 @@
 target/
+collector/__pycache__/
+*.pyc
