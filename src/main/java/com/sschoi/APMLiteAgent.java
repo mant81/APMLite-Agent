@@ -177,6 +177,7 @@ public class APMLiteAgent {
                 STORE.setSnapshot(snapshot);
                 STORE.addTimelinePoint(snapshot);
                 COLLECTOR.offer(snapshot);
+                COLLECTOR.offer(TRAFFIC.snapshot());
                 persistSnapshot(snapshot);
             } catch (Exception e) {
                 log("JVM sampler error: " + e.getMessage());
@@ -503,6 +504,10 @@ public class APMLiteAgent {
 
         private void offer(SlowQueryEvent event) {
             offer("{\"type\":\"SQL\",\"service\":\"" + escapeJson(CONFIG.serviceName) + "\",\"timestamp\":" + event.timestamp + ",\"durationMs\":" + event.durationMs + ",\"status\":\"" + escapeJson(event.status) + "\",\"sql\":\"" + escapeJson(event.sql) + "\"}");
+        }
+
+        private void offer(TrafficSnapshot snapshot) {
+            offer("{\"type\":\"TRAFFIC\",\"service\":\"" + escapeJson(CONFIG.serviceName) + "\",\"timestamp\":" + snapshot.timestamp + ",\"tps\":" + snapshot.tps + ",\"activeRequests\":" + snapshot.activeRequests + ",\"errorRatePercent\":" + snapshot.errorRatePercent + "}");
         }
 
         private void offer(String event) {
@@ -904,6 +909,15 @@ public class APMLiteAgent {
                     + "}";
         }
 
+        private TrafficSnapshot snapshot() {
+            TrafficSnapshot snapshot = new TrafficSnapshot();
+            snapshot.timestamp = System.currentTimeMillis();
+            snapshot.tps = hitsPerSecond;
+            snapshot.activeRequests = activeRequests.get();
+            snapshot.errorRatePercent = errorRatePercent;
+            return snapshot;
+        }
+
         private String alertsJson() {
             List<String> alerts = new ArrayList<String>();
             if (CONFIG.alertHitsPerSecond > 0 && hitsPerSecond >= CONFIG.alertHitsPerSecond) {
@@ -1114,6 +1128,13 @@ public class APMLiteAgent {
         private String uri;
         private int status;
         private String message;
+    }
+
+    private static final class TrafficSnapshot {
+        private long timestamp;
+        private long tps;
+        private long activeRequests;
+        private double errorRatePercent;
     }
 
     private static final class SqlPoint {
