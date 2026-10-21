@@ -53,9 +53,9 @@ public class APMLiteAgent {
         TRAFFIC.enter(request);
     }
 
-    public static void recordHttpExit(Object request, long durationNanos, Throwable thrown) {
+    public static void recordHttpExit(Object request, Object response, long durationNanos, Throwable thrown) {
         TRAFFIC.exit();
-        TRAFFIC.observe(request, durationNanos, thrown);
+        TRAFFIC.observe(request, response, durationNanos, thrown);
     }
 
     public static void premain(String agentArgs, Instrumentation inst) {
@@ -295,8 +295,9 @@ public class APMLiteAgent {
         @Advice.OnMethodExit(onThrowable = Throwable.class)
         public static void onExit(@Advice.Enter long startedAt,
                                   @Advice.Argument(0) Object request,
+                                  @Advice.Argument(1) Object response,
                                   @Advice.Thrown Throwable thrown) {
-            APMLiteAgent.recordHttpExit(request, System.nanoTime() - startedAt, thrown);
+            APMLiteAgent.recordHttpExit(request, response, System.nanoTime() - startedAt, thrown);
         }
     }
 
@@ -747,11 +748,12 @@ public class APMLiteAgent {
             activeRequests.updateAndGet(value -> value > 0 ? value - 1 : 0);
         }
 
-        private void observe(Object request, long durationNanos, Throwable thrown) {
+        private void observe(Object request, Object response, long durationNanos, Throwable thrown) {
             String uri = requestUri(request);
             TrafficStat stat = getOrCreate(uri);
             if (stat != null) {
-                stat.observe(durationNanos, thrown != null);
+                int status = responseStatus(response);
+                stat.observe(durationNanos, thrown != null || status >= 500);
                 stat.active.updateAndGet(value -> value > 0 ? value - 1 : 0);
             }
         }
@@ -821,6 +823,17 @@ public class APMLiteAgent {
                 return truncate(value == null ? "unknown" : String.valueOf(value), 200);
             } catch (Throwable ignored) {
                 return "unknown";
+            }
+        }
+
+        private int responseStatus(Object response) {
+            if (response == null) return 0;
+            try {
+                Method method = response.getClass().getMethod("getStatus");
+                Object value = method.invoke(response);
+                return value instanceof Number ? ((Number) value).intValue() : 0;
+            } catch (Throwable ignored) {
+                return 0;
             }
         }
 
