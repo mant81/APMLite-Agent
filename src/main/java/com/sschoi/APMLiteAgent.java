@@ -284,7 +284,8 @@ public class APMLiteAgent {
                 .ignore(ElementMatchers.nameStartsWith("net.bytebuddy."))
                 .type(ElementMatchers.isSubTypeOf(Connection.class))
                 .transform((builder, typeDescription, classLoader, module, protectionDomain) ->
-                        builder.method(ElementMatchers.named("prepareStatement").and(ElementMatchers.takesArguments(String.class)))
+                        builder.method(ElementMatchers.named("prepareStatement")
+                                .and(ElementMatchers.takesArgument(0, String.class)))
                                 .intercept(Advice.to(PrepareStatementAdvice.class)))
                 .installOn(inst);
     }
